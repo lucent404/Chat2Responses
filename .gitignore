@@ -1,0 +1,11 @@
+/target
+__pycache__/
+*.pyc
+dist/
+*.egg-info/
+.venv/
+node_modules/
+data/
+admin-ui/dist
+admin-ui/node_modules
+.codex

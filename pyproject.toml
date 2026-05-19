@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "chat2responses"
+dynamic = ["version"]
+requires-python = ">=3.11"
+description = "Chat Completions to Responses API service proxy"
+license = { text = "MIT" }
+readme = "README.md"
+keywords = ["openai", "llm", "proxy", "responses", "chat-completions"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries",
+]
+
+[tool.maturin]
+binaries = ["chat2responses"]
+python-packages = ["chat2responses"]
