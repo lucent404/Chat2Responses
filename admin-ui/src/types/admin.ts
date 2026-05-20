@@ -87,6 +87,15 @@ export type AvailableModel = {
   source: string;
   owner: string;
   candidate_count: number;
+  context_window: number;
+  max_context_window: number;
+  supports_parallel_tool_calls: boolean;
+  supports_reasoning_summaries: boolean;
+};
+
+export type CodexCatalogStatus = {
+  source_model_count: number;
+  generated_model_count: number;
 };
 
 export type RequestLog = {

@@ -1,5 +1,5 @@
 import { request } from "./client";
-import type { AdminStatus, ApiKey, AppSettings, AvailableModel, CreatedApiKey, ModelRoute, PageRequest, Paginated, RequestLog, Upstream, UpstreamModel, UpstreamModels } from "../types/admin";
+import type { AdminStatus, ApiKey, AppSettings, AvailableModel, CodexCatalogStatus, CreatedApiKey, ModelRoute, PageRequest, Paginated, RequestLog, Upstream, UpstreamModel, UpstreamModels } from "../types/admin";
 
 export function getAdminStatus() {
   return request<AdminStatus>("/admin/api/status");
@@ -166,4 +166,27 @@ export function updateSettings(input: AppSettings) {
     method: "PUT",
     body: JSON.stringify(input)
   });
+}
+
+export function getCodexCatalogStatus() {
+  return request<CodexCatalogStatus>("/admin/api/codex-catalog/status");
+}
+
+export async function downloadCodexCatalog() {
+  const response = await fetch("/admin/api/codex-catalog/download", {
+    credentials: "include"
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    try {
+      const parsed = JSON.parse(text) as { message?: string };
+      throw new Error(parsed.message || text || `${response.status} ${response.statusText}`);
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error(text || `${response.status} ${response.statusText}`);
+      }
+      throw error;
+    }
+  }
+  return response.blob();
 }

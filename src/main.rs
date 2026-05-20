@@ -1,3 +1,4 @@
+mod codex_catalog;
 mod db;
 mod security;
 mod session;
@@ -155,6 +156,7 @@ struct SettingsInput {
     log_error_max_chars: i64,
 }
 
+const CODEX_BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent. You help the user work in their local development environment, inspect the repository before making assumptions, make focused code changes when requested, and communicate clearly about what changed and how it was verified.";
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -229,6 +231,11 @@ fn build_router(state: AppState) -> Router {
         .route("/admin/api/keys/:id/disable", post(disable_api_key))
         .route("/admin/api/keys/:id", delete(delete_api_key))
         .route("/admin/api/logs", get(list_logs))
+        .route("/admin/api/codex-catalog/status", get(codex_catalog_status))
+        .route(
+            "/admin/api/codex-catalog/download",
+            get(download_codex_catalog),
+        )
         .route(
             "/admin/api/settings",
             get(get_settings).put(update_settings),
@@ -572,6 +579,47 @@ async fn list_available_models(State(state): State<AppState>, headers: HeaderMap
     }
 }
 
+async fn codex_catalog_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = require_admin(&state, &headers).await {
+        return resp;
+    }
+    match state.db.list_available_models_for_key(None).await {
+        Ok(models) => Json(codex_catalog::catalog_status(models.len())).into_response(),
+        Err(e) => internal_error(e),
+    }
+}
+
+async fn download_codex_catalog(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = require_admin(&state, &headers).await {
+        return resp;
+    }
+    let models = match state.db.list_available_models_for_key(None).await {
+        Ok(models) => models,
+        Err(e) => return internal_error(e),
+    };
+    match codex_catalog::generate_catalog_json(&models) {
+        Ok(catalog) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json; charset=utf-8"),
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_static("attachment; filename=\"model-catalog.json\""),
+                ),
+            ],
+            catalog,
+        )
+            .into_response(),
+        Err(e) => api_error(
+            StatusCode::BAD_REQUEST,
+            "CATALOG_GENERATION_FAILED",
+            e.to_string(),
+        ),
+    }
+}
+
 async fn create_model_route(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -824,12 +872,53 @@ async fn handle_models(State(state): State<AppState>, headers: HeaderMap) -> Res
             Json(serde_json::json!({
                 "object": "list",
                 "data": data.clone(),
-                "models": data,
+                "models": models.iter().enumerate().map(|(index, model)| codex_model_metadata(model, index)).collect::<Vec<_>>(),
             }))
             .into_response()
         }
         Err(e) => internal_error(e),
     }
+}
+
+fn codex_model_metadata(model: &db::AvailableModel, index: usize) -> serde_json::Value {
+    let context_window = model.context_window.max(1);
+    let max_context_window = model.max_context_window.max(context_window);
+    serde_json::json!({
+        "slug": model.id,
+        "display_name": model.id,
+        "description": format!("{} via Chat2Responses", model.owner),
+        "default_reasoning_level": null,
+        "supported_reasoning_levels": [],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 100 + index as i64,
+        "additional_speed_tiers": [],
+        "service_tiers": [],
+        "availability_nux": null,
+        "upgrade": null,
+        "base_instructions": CODEX_BASE_INSTRUCTIONS,
+        "model_messages": null,
+        "supports_reasoning_summaries": model.supports_reasoning_summaries,
+        "default_reasoning_summary": "auto",
+        "support_verbosity": false,
+        "default_verbosity": null,
+        "apply_patch_tool_type": null,
+        "web_search_tool_type": "text",
+        "truncation_policy": {
+            "mode": "tokens",
+            "limit": 10000,
+        },
+        "supports_parallel_tool_calls": model.supports_parallel_tool_calls,
+        "supports_image_detail_original": false,
+        "context_window": context_window,
+        "max_context_window": max_context_window,
+        "auto_compact_token_limit": null,
+        "effective_context_window_percent": 95,
+        "experimental_supported_tools": [],
+        "input_modalities": ["text"],
+        "supports_search_tool": false,
+    })
 }
 
 async fn handle_responses(

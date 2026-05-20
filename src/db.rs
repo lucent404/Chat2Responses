@@ -102,6 +102,10 @@ pub struct AvailableModel {
     pub source: String,
     pub owner: String,
     pub candidate_count: i64,
+    pub context_window: i64,
+    pub max_context_window: i64,
+    pub supports_parallel_tool_calls: bool,
+    pub supports_reasoning_summaries: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -1292,7 +1296,11 @@ impl Db {
         rows.extend(
             sqlx::query_as::<_, AvailableModel>(
                 r#"
-                SELECT m.model AS id, 'upstream' AS source, u.name AS owner, COUNT(*) AS candidate_count
+                SELECT m.model AS id, 'upstream' AS source, u.name AS owner, COUNT(*) AS candidate_count,
+                       MAX(m.context_window) AS context_window,
+                       MAX(m.max_context_window) AS max_context_window,
+                       MAX(CASE WHEN m.supports_parallel_tool_calls THEN 1 ELSE 0 END) AS supports_parallel_tool_calls,
+                       MAX(CASE WHEN m.supports_reasoning_summaries THEN 1 ELSE 0 END) AS supports_reasoning_summaries
                 FROM upstream_models m JOIN upstreams u ON u.id = m.upstream_id
                 WHERE m.enabled = 1 AND u.enabled = 1
                 GROUP BY m.model, u.name
@@ -1304,7 +1312,11 @@ impl Db {
         rows.extend(
             sqlx::query_as::<_, AvailableModel>(
                 r#"
-                SELECT m.public_model AS id, 'mapping' AS source, u.name AS owner, COUNT(*) AS candidate_count
+                SELECT m.public_model AS id, 'mapping' AS source, u.name AS owner, COUNT(*) AS candidate_count,
+                       MAX(m.context_window) AS context_window,
+                       MAX(m.max_context_window) AS max_context_window,
+                       MAX(CASE WHEN m.supports_parallel_tool_calls THEN 1 ELSE 0 END) AS supports_parallel_tool_calls,
+                       MAX(CASE WHEN m.supports_reasoning_summaries THEN 1 ELSE 0 END) AS supports_reasoning_summaries
                 FROM model_routes m
                 JOIN upstreams u ON u.id = m.upstream_id
                 JOIN upstream_models um ON um.upstream_id = m.upstream_id AND um.model = m.upstream_model
@@ -1325,6 +1337,11 @@ impl Db {
             }
             if let Some(existing) = merged.iter_mut().find(|item| item.id == row.id) {
                 existing.candidate_count += row.candidate_count;
+                existing.context_window = existing.context_window.max(row.context_window);
+                existing.max_context_window =
+                    existing.max_context_window.max(row.max_context_window);
+                existing.supports_parallel_tool_calls |= row.supports_parallel_tool_calls;
+                existing.supports_reasoning_summaries |= row.supports_reasoning_summaries;
                 if !existing.source.contains(&row.source) {
                     existing.source = format!("{},{}", existing.source, row.source);
                 }

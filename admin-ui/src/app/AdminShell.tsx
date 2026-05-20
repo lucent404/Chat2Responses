@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { CircleDot, Command, LogOut, RefreshCcw } from "lucide-react";
 import { NavLink, Navigate, useParams } from "react-router-dom";
-import { getSettings, logoutAdmin, listApiKeys, listAvailableModels, listModelRoutes, listRequestLogs, listUpstreams, updateSettings } from "../api/admin";
+import { getCodexCatalogStatus, getSettings, logoutAdmin, listApiKeys, listAvailableModels, listModelRoutes, listRequestLogs, listUpstreams, updateSettings } from "../api/admin";
 import { BrandBlock } from "../components/common/BrandBlock";
 import { PanelHeader } from "../components/common/PanelHeader";
 import { Button } from "../components/ui/button";
@@ -10,8 +10,9 @@ import { LogsPanel } from "../features/logs/LogsPanel";
 import { ModelsPanel } from "../features/models/ModelsPanel";
 import { OverviewPanel } from "../features/overview/OverviewPanel";
 import { SettingsPanel } from "../features/settings/SettingsPanel";
+import { TutorialPanel } from "../features/tutorial/TutorialPanel";
 import { UpstreamsPanel } from "../features/upstreams/UpstreamsPanel";
-import type { ApiKey, AppSettings, AvailableModel, ModelRoute, PageState, RequestLog, ToastState, Upstream } from "../types/admin";
+import type { ApiKey, AppSettings, AvailableModel, CodexCatalogStatus, ModelRoute, PageState, RequestLog, ToastState, Upstream } from "../types/admin";
 import { navItems, type Tab } from "./navigation";
 
 type AdminShellProps = {
@@ -40,6 +41,7 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [catalogStatus, setCatalogStatus] = useState<CodexCatalogStatus | null>(null);
   const [overviewTotals, setOverviewTotals] = useState({
     upstreams: 0,
     models: 0,
@@ -94,6 +96,11 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
     setSettings(nextSettings);
   };
 
+  const loadTutorial = async () => {
+    const nextStatus = await getCodexCatalogStatus();
+    setCatalogStatus(nextStatus);
+  };
+
   const loadOverview = async () => {
     const [nextUpstreams, nextModels, nextAvailableModels, nextKeys, nextLogs, nextSettings] = await Promise.all([
       listUpstreams({ page: 1, pageSize: 20, q: "" }),
@@ -128,6 +135,7 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
       if (tab === "keys") await loadKeys();
       if (tab === "logs") await loadLogs();
       if (tab === "settings") await loadSettings();
+      if (tab === "tutorial") await loadTutorial();
     } finally {
       setRefreshing(false);
     }
@@ -153,11 +161,11 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
   if (!tab) return <Navigate to="/admin/overview" replace />;
 
   return (
-    <main className="relative min-h-screen overflow-hidden bg-background">
+    <main className="relative h-screen overflow-hidden bg-background">
       <div className="ambient-grid pointer-events-none absolute inset-0" />
       <div className="noise-overlay pointer-events-none absolute inset-0" />
-      <div className="relative grid min-h-screen grid-cols-[292px_minmax(0,1fr)] gap-5 p-5 max-[1100px]:grid-cols-1 max-[1100px]:gap-4 max-[760px]:p-3">
-      <aside className="glass-rail sticky top-5 flex h-[calc(100vh-40px)] flex-col gap-5 rounded-[28px] p-5 max-[1100px]:static max-[1100px]:h-auto max-[1100px]:rounded-3xl max-[1100px]:p-3">
+      <div className="relative grid h-screen grid-cols-[292px_minmax(0,1fr)] gap-5 overflow-hidden p-5 max-[1100px]:grid-cols-1 max-[1100px]:grid-rows-[auto_minmax(0,1fr)] max-[1100px]:gap-4 max-[760px]:p-3">
+      <aside className="glass-rail flex h-full min-h-0 flex-col gap-5 rounded-[28px] p-5 max-[1100px]:h-auto max-[1100px]:rounded-3xl max-[1100px]:p-3">
         <div className="flex items-center justify-between gap-3">
           <BrandBlock subtitle={user} compact />
           <Button variant="ghost" size="icon" className="hidden max-[1100px]:inline-flex" onClick={logout} aria-label="退出">
@@ -188,7 +196,7 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
           退出登录
         </Button>
       </aside>
-      <section className="min-w-0 py-1 pr-1 max-[1100px]:p-0">
+      <section className="min-h-0 min-w-0 overflow-y-auto py-1 pr-1 max-[1100px]:p-0">
         <PanelHeader tab={tab} refresh={refresh} refreshing={refreshing} setToast={setToast} />
         {refreshing ? (
           <LoadingPanels />
@@ -213,6 +221,7 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
             {tab === "keys" && <ApiKeysPanel rows={keys} pageState={keyPage} setPageState={setKeyPage} refresh={refresh} setToast={setToast} />}
             {tab === "logs" && <LogsPanel rows={logs} pageState={logPage} setPageState={setLogPage} settings={settings} />}
             {tab === "settings" && <SettingsPanel settings={settings} refresh={refresh} saveSettings={saveSettings} setToast={setToast} />}
+            {tab === "tutorial" && <TutorialPanel catalogStatus={catalogStatus} refresh={refresh} setToast={setToast} />}
           </>
         )}
       </section>
