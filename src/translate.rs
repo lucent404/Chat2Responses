@@ -4,7 +4,11 @@ use std::collections::HashSet;
 use crate::{session::SessionStore, types::*};
 
 /// Convert a Responses API request + prior history into a Chat Completions request.
-pub fn to_chat_request(req: &ResponsesRequest, history: Vec<ChatMessage>, sessions: &SessionStore) -> ChatRequest {
+pub fn to_chat_request(
+    req: &ResponsesRequest,
+    history: Vec<ChatMessage>,
+    sessions: &SessionStore,
+) -> ChatRequest {
     to_chat_request_with_model(req, history, sessions, map_model_name(&req.model))
 }
 
@@ -52,12 +56,14 @@ pub fn to_chat_request_with_model(
             // Collect call_ids already present in history (from previous_response_id).
             // This prevents creating duplicate assistant-with-tool_calls messages
             // when the input items replay function_call entries from prior output.
-            let existing_call_ids: HashSet<String> = messages.iter()
+            let existing_call_ids: HashSet<String> = messages
+                .iter()
                 .flat_map(|msg| {
                     let mut ids: Vec<String> = Vec::new();
                     if let Some(tcs) = &msg.tool_calls {
-                        ids.extend(tcs.iter()
-                            .filter_map(|tc| tc.get("id").and_then(|v| v.as_str()).map(String::from)));
+                        ids.extend(tcs.iter().filter_map(|tc| {
+                            tc.get("id").and_then(|v| v.as_str()).map(String::from)
+                        }));
                     }
                     ids.extend(msg.tool_call_id.iter().cloned());
                     ids
@@ -66,7 +72,8 @@ pub fn to_chat_request_with_model(
 
             // For function_call_output dedup, only skip if a tool response
             // already exists for the call_id (not just from assistant tool_calls).
-            let existing_tool_responses: HashSet<String> = messages.iter()
+            let existing_tool_responses: HashSet<String> = messages
+                .iter()
                 .filter_map(|msg| msg.tool_call_id.clone())
                 .collect();
 
@@ -94,12 +101,16 @@ pub fn to_chat_request_with_model(
 
                     while i < items.len() {
                         let cur = &items[i];
-                        if cur.get("type").and_then(|v| v.as_str()).unwrap_or("") != "function_call" {
+                        if cur.get("type").and_then(|v| v.as_str()).unwrap_or("") != "function_call"
+                        {
                             break;
                         }
                         let call_id = cur.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
-                        let name    = cur.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                        let args    = cur.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+                        let name = cur.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let args = cur
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("{}");
                         if reasoning_content.is_none() {
                             reasoning_content = sessions.get_reasoning(call_id);
                         }
@@ -127,14 +138,15 @@ pub fn to_chat_request_with_model(
                 } else {
                     match item_type {
                         "function_call_output" => {
-                            let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let call_id =
+                                item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                             // Skip function_call_output items if a tool response
                             // for this call_id already exists in history.
                             if existing_tool_responses.contains(call_id) {
                                 i += 1;
                                 continue;
                             }
-                            let output  = item.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                            let output = item.get("output").and_then(|v| v.as_str()).unwrap_or("");
                             messages.push(ChatMessage {
                                 role: "tool".into(),
                                 content: Some(Value::String(output.to_string())),
@@ -170,7 +182,8 @@ pub fn to_chat_request_with_model(
                             // from the turn-level index (needed for thinking models like
                             // DeepSeek that require reasoning_content to be passed back).
                             if msg.role == "assistant" {
-                                msg.reasoning_content = sessions.get_turn_reasoning(&messages, &msg);
+                                msg.reasoning_content =
+                                    sessions.get_turn_reasoning(&messages, &msg);
                             }
                             // System/developer messages from input items must go to the
                             // front of the array. Codex sometimes interleaves them between
@@ -255,10 +268,18 @@ fn convert_tool(tool: &Value) -> Value {
     // Convert from Responses API flat format.
     if obj.get("type").and_then(Value::as_str) == Some("function") {
         let mut func = serde_json::Map::new();
-        if let Some(v) = obj.get("name") { func.insert("name".into(), v.clone()); }
-        if let Some(v) = obj.get("description") { func.insert("description".into(), v.clone()); }
-        if let Some(v) = obj.get("parameters") { func.insert("parameters".into(), v.clone()); }
-        if let Some(v) = obj.get("strict") { func.insert("strict".into(), v.clone()); }
+        if let Some(v) = obj.get("name") {
+            func.insert("name".into(), v.clone());
+        }
+        if let Some(v) = obj.get("description") {
+            func.insert("description".into(), v.clone());
+        }
+        if let Some(v) = obj.get("parameters") {
+            func.insert("parameters".into(), v.clone());
+        }
+        if let Some(v) = obj.get("strict") {
+            func.insert("strict".into(), v.clone());
+        }
         return json!({"type": "function", "function": func});
     }
     tool.clone()
@@ -270,36 +291,60 @@ pub fn from_chat_response(
     model: &str,
     chat: ChatResponse,
 ) -> (ResponsesResponse, Vec<ChatMessage>) {
-    let choice = chat.choices.into_iter().next().unwrap_or_else(|| ChatChoice {
-        message: ChatMessage {
-            role: "assistant".into(),
-            content: Some(Value::String(String::new())),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        },
-    });
+    let choice = chat
+        .choices
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| ChatChoice {
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: Some(Value::String(String::new())),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        });
 
     let text = choice.message.text_content().to_string();
+    let reasoning = choice.message.reasoning_content.clone();
     let usage = chat.usage.unwrap_or(ChatUsage {
         prompt_tokens: 0,
         completion_tokens: 0,
         total_tokens: 0,
     });
 
+    let mut output = Vec::new();
+    if let Some(reasoning) = reasoning.filter(|text| !text.is_empty()) {
+        output.push(ResponsesOutputItem {
+            kind: "reasoning".into(),
+            id: Some(format!("rs_{}", uuid::Uuid::new_v4().simple())),
+            role: None,
+            status: None,
+            content: Vec::new(),
+            summary: vec![ReasoningSummaryPart {
+                kind: "summary_text".into(),
+                text: reasoning,
+            }],
+        });
+    }
+    output.push(ResponsesOutputItem {
+        kind: "message".into(),
+        id: Some(format!("msg_{}", uuid::Uuid::new_v4().simple())),
+        role: Some("assistant".into()),
+        status: Some("completed".into()),
+        content: vec![ContentPart {
+            kind: "output_text".into(),
+            text: Some(text),
+        }],
+        summary: Vec::new(),
+    });
+
     let response = ResponsesResponse {
         id,
         object: "response",
         model: model.to_string(),
-        output: vec![ResponsesOutputItem {
-            kind: "message".into(),
-            role: "assistant".into(),
-            content: vec![ContentPart {
-                kind: "output_text".into(),
-                text: Some(text),
-            }],
-        }],
+        output,
         usage: ResponsesUsage {
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
@@ -361,10 +406,7 @@ fn map_content_part(part: &Value) -> Value {
         "input_image" => {
             // Responses API: image_url is a plain string (often a data: URL).
             // Chat Completions wants it wrapped in an object.
-            let url = part
-                .get("image_url")
-                .and_then(|u| u.as_str())
-                .unwrap_or("");
+            let url = part.get("image_url").and_then(|u| u.as_str()).unwrap_or("");
             json!({"type": "image_url", "image_url": {"url": url}})
         }
         "image_url" => {
@@ -481,6 +523,36 @@ mod tests {
         });
         let result = convert_tool(&already);
         assert_eq!(result, already);
+    }
+
+    #[test]
+    fn test_from_chat_response_includes_reasoning_summary_item() {
+        let chat = ChatResponse {
+            choices: vec![ChatChoice {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(Value::String("final answer".into())),
+                    reasoning_content: Some("thinking trace".into()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                },
+            }],
+            usage: None,
+        };
+
+        let (resp, messages) = from_chat_response("resp_1".into(), "public-model", chat);
+        let wire = serde_json::to_value(&resp).expect("response serializes");
+
+        assert_eq!(wire["output"][0]["type"], "reasoning");
+        assert_eq!(wire["output"][0]["summary"][0]["type"], "summary_text");
+        assert_eq!(wire["output"][0]["summary"][0]["text"], "thinking trace");
+        assert_eq!(wire["output"][1]["type"], "message");
+        assert_eq!(wire["output"][1]["content"][0]["text"], "final answer");
+        assert_eq!(
+            messages[0].reasoning_content.as_deref(),
+            Some("thinking trace")
+        );
     }
 
     #[test]
@@ -608,7 +680,11 @@ mod tests {
 
         // Should have: user, assistant{tool_calls:[call_1]}, tool(call_1), user(next)
         // NOT: user, assistant{tool_calls:[call_1]}, assistant{tool_calls:[call_1]}, tool(call_1), user
-        assert_eq!(chat.messages.len(), 4, "should not duplicate assistant tool_calls message");
+        assert_eq!(
+            chat.messages.len(),
+            4,
+            "should not duplicate assistant tool_calls message"
+        );
         assert_eq!(chat.messages[0].role, "user");
         assert_eq!(chat.messages[1].role, "assistant");
         assert!(chat.messages[1].tool_calls.is_some());
@@ -688,8 +764,11 @@ mod tests {
         ]));
         let chat = to_chat_request(&req, vec![], &sessions);
         let roles: Vec<&str> = chat.messages.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, ["system", "assistant", "tool", "user"],
-            "system must be at front, assistant→tool pairing must be contiguous");
+        assert_eq!(
+            roles,
+            ["system", "assistant", "tool", "user"],
+            "system must be at front, assistant→tool pairing must be contiguous"
+        );
     }
 
     /// When a system/developer message appears at the very start of input

@@ -12,11 +12,11 @@ export const SheetContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
 >(({ className, children, ...props }, ref) => (
   <DialogPrimitive.Portal>
-    <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/30" />
+    <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-slate-950/25 backdrop-blur-md" />
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed bottom-0 right-0 top-0 z-50 grid w-full max-w-[520px] grid-rows-[auto_1fr] border-l border-border bg-card text-card-foreground shadow-panel sm:w-[520px]",
+        "glass-panel-strong fixed bottom-0 right-0 top-0 z-50 grid w-full max-w-[560px] grid-rows-[auto_1fr] rounded-l-3xl text-card-foreground sm:w-[560px]",
         className
       )}
       {...props}
@@ -31,7 +31,7 @@ export const SheetContent = React.forwardRef<
 SheetContent.displayName = DialogPrimitive.Content.displayName;
 
 export const SheetHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
-  <div className={cn("grid gap-1.5 border-b border-border p-5 pr-12", className)} {...props} />
+  <div className={cn("grid gap-1.5 border-b border-slate-300/60 bg-blue-50/75 p-5 pr-12", className)} {...props} />
 );
 
 export const SheetBody = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (

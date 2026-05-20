@@ -20,6 +20,10 @@
 //! `https://api.deepseek.com/v1`, and exercises the path through reqwest.
 
 use axum::{body::Body, extract::State, http::StatusCode, response::Response, Router};
+use chat2responses::{
+    db::{ApiKeyInput, Db, UpstreamInput, UpstreamModelInput},
+    security::Crypto,
+};
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -32,7 +36,9 @@ const RELAY_BIN: &str = env!("CARGO_BIN_EXE_chat2responses");
 const DEEPSEEK_UPSTREAM: &str = "https://api.deepseek.com/v1";
 
 fn deepseek_key() -> Option<String> {
-    std::env::var("DEEPSEEK_API_KEY").ok().filter(|s| !s.is_empty())
+    std::env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 fn pick_port() -> u16 {
@@ -118,6 +124,48 @@ fn responses_body(model: &str, prompt: &str, stream: bool) -> Value {
         "stream": stream,
         "include": []
     })
+}
+
+async fn seed_test_route(db: &Db, crypto: &Crypto, upstream_base: &str, client_key: &str) {
+    let upstream = db
+        .create_upstream(
+            &UpstreamInput {
+                name: "test-upstream".into(),
+                base_url: upstream_base.into(),
+                api_key: String::new(),
+                enabled: true,
+                models: None,
+                model_configs: None,
+            },
+            crypto.encrypt("").unwrap(),
+        )
+        .await
+        .unwrap();
+    db.upsert_upstream_models(
+        upstream.id,
+        &[UpstreamModelInput {
+            model: "test-model".into(),
+            enabled: true,
+            context_window: 128_000,
+            max_context_window: 128_000,
+            supports_parallel_tool_calls: true,
+            supports_reasoning_summaries: true,
+        }],
+        None,
+    )
+    .await
+    .unwrap();
+    db.create_api_key(
+        &ApiKeyInput {
+            name: "test-client".into(),
+            enabled: true,
+            models: None,
+        },
+        &crypto.hash_api_key(client_key),
+        crypto.encrypt(client_key).unwrap(),
+    )
+    .await
+    .unwrap();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -291,7 +339,9 @@ async fn assert_streaming_chat(model: &str) {
     let full: String = text_chunks.join("");
     if !full.trim().is_empty() {
         assert!(
-            event_types.iter().any(|e| e == "response.output_item.added"),
+            event_types
+                .iter()
+                .any(|e| e == "response.output_item.added"),
             "non-empty text but no output_item.added: {event_types:?}"
         );
         assert!(
@@ -303,6 +353,138 @@ async fn assert_streaming_chat(model: &str) {
             "note: {model} returned an empty streaming completion (model quirk, not a relay bug)"
         );
     }
+}
+
+#[tokio::test]
+async fn streaming_reasoning_uses_responses_reasoning_events() {
+    let upstream = Router::new().fallback(|| async {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(Body::from(concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think \"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"more\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n",
+                "data: [DONE]\n\n"
+            )))
+            .unwrap()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, upstream).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let db_path = std::env::temp_dir().join(format!(
+        "chat2responses-test-{}.db",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let database_url = format!("sqlite://{}", db_path.display());
+    let db = Db::connect(&database_url).await.unwrap();
+    let crypto = Crypto::new("test-secret");
+    seed_test_route(
+        &db,
+        &crypto,
+        &format!("http://127.0.0.1:{upstream_port}"),
+        "test-key",
+    )
+    .await;
+    drop(db);
+
+    let relay_port = pick_port();
+    let mut relay_child = Command::new(RELAY_BIN)
+        .env("CHAT2RESPONSES_PORT", relay_port.to_string())
+        .env("CHAT2RESPONSES_DATABASE_URL", &database_url)
+        .env("CHAT2RESPONSES_SECRET", "test-secret")
+        .env("RUST_LOG", "chat2responses=warn")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn Chat2Responses");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        if std::net::TcpStream::connect(("127.0.0.1", relay_port)).is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+    let relay_url = format!("http://127.0.0.1:{relay_port}/v1/responses");
+    let resp = reqwest::Client::new()
+        .post(relay_url)
+        .bearer_auth("test-key")
+        .json(&responses_body("test-model", "hi", true))
+        .send()
+        .await
+        .expect("POST /v1/responses")
+        .error_for_status()
+        .expect("stream status");
+
+    let mut events = resp.bytes_stream().eventsource();
+    let mut event_log: Vec<(String, Value)> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while let Some(ev) = tokio::time::timeout(deadline - Instant::now(), events.next())
+        .await
+        .expect("stream timeout")
+    {
+        let ev = ev.expect("sse parse");
+        let data: Value = serde_json::from_str(&ev.data).expect("event data json");
+        let event_name = ev.event.clone();
+        event_log.push((event_name.clone(), data));
+        if event_name == "response.completed" {
+            break;
+        }
+    }
+
+    let names: Vec<&str> = event_log.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "response.created",
+            "response.output_item.added",
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.done",
+            "response.reasoning_summary_part.done",
+            "response.output_item.done",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed"
+        ]
+    );
+
+    let reasoning_added = &event_log[1].1;
+    assert_eq!(reasoning_added["output_index"], 0);
+    assert_eq!(reasoning_added["item"]["type"], "reasoning");
+
+    let message_added = &event_log[8].1;
+    assert_eq!(message_added["output_index"], 1);
+    assert_eq!(message_added["item"]["type"], "message");
+
+    let text_delta = &event_log[10].1;
+    assert_eq!(text_delta["output_index"], 1);
+    assert_eq!(text_delta["content_index"], 0);
+
+    let completed = event_log.last().unwrap().1.clone();
+    assert_eq!(completed["response"]["output"][0]["type"], "reasoning");
+    assert_eq!(
+        completed["response"]["output"][0]["summary"][0]["text"],
+        "think more"
+    );
+    assert_eq!(completed["response"]["output"][1]["type"], "message");
+    assert_eq!(
+        completed["response"]["output"][1]["content"][0]["text"],
+        "answer"
+    );
+
+    let _ = relay_child.kill();
+    let _ = relay_child.wait();
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
@@ -490,8 +672,8 @@ async fn proxy_handler(
 
     match rb.send().await {
         Ok(upstream) => {
-            let status = StatusCode::from_u16(upstream.status().as_u16())
-                .unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let mut builder = Response::builder().status(status);
             for (k, v) in upstream.headers().iter() {
                 let kn = k.as_str().to_lowercase();
@@ -513,10 +695,7 @@ async fn proxy_handler(
     }
 }
 
-async fn spawn_recording_proxy(
-    upstream_base: &str,
-    auth: &str,
-) -> (u16, Arc<Mutex<Vec<Vec<u8>>>>) {
+async fn spawn_recording_proxy(upstream_base: &str, auth: &str) -> (u16, Arc<Mutex<Vec<Vec<u8>>>>) {
     let bodies: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
     let state = RecordingProxyState {
         upstream_base: Arc::new(upstream_base.to_string()),
@@ -626,8 +805,7 @@ async fn live_deepseek_v4_pro_reasoning_round_trip() {
     });
 
     let (fc, _events1) = streaming_call(&relay.url("/v1/responses"), turn1).await;
-    let (call_id, name, arguments) =
-        fc.expect("turn 1 must produce a function_call from v4-pro");
+    let (call_id, name, arguments) = fc.expect("turn 1 must produce a function_call from v4-pro");
     assert_eq!(name, "get_weather");
     assert!(!call_id.is_empty(), "call_id must be non-empty");
 
@@ -811,7 +989,10 @@ async fn live_deepseek_v4_pro_image_input_wire_shape() {
     });
     assert!(has_text, "missing text part: {parts:?}");
     assert!(has_image, "missing image_url part: {parts:?}");
-    eprintln!("✓ outbound multimodal shape verified ({} parts)", parts.len());
+    eprintln!(
+        "✓ outbound multimodal shape verified ({} parts)",
+        parts.len()
+    );
 }
 
 /// Companion to the wire-shape test: confirm the symptom of DeepSeek's

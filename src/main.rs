@@ -16,12 +16,15 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use clap::Parser;
-use db::{ApiKeyInput, Db, LogInput, ModelRouteInput, UpstreamInput};
+use db::{
+    ApiKeyInput, AppSettings, Db, LogInput, ModelRouteInput, PageParams, UpstreamInput,
+    UpstreamModelInput,
+};
 use reqwest::{Client, Url};
 use security::{generate_api_key, generate_session_token, hash_password, verify_password, Crypto};
 use serde::{Deserialize, Serialize};
 use session::SessionStore;
-use std::{sync::Arc, time::Instant};
+use std::{sync::Arc, time::Duration as StdDuration, time::Instant};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{debug, error, info, warn};
 use types::*;
@@ -81,7 +84,43 @@ struct CreatedApiKey {
     name: String,
     enabled: bool,
     created_at: String,
+    masked_key: String,
+    models: Vec<String>,
     key: String,
+}
+
+#[derive(Serialize)]
+struct ApiKeyView {
+    id: i64,
+    name: String,
+    enabled: bool,
+    created_at: String,
+    last_used_at: Option<String>,
+    masked_key: Option<String>,
+    key_recoverable: bool,
+    models: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RevealedApiKey {
+    key: String,
+    masked_key: String,
+}
+
+#[derive(Serialize)]
+struct Paginated<T> {
+    items: Vec<T>,
+    total: i64,
+    page: i64,
+    page_size: i64,
+    total_pages: i64,
+}
+
+#[derive(Deserialize)]
+struct DiscoverModelsInput {
+    base_url: String,
+    #[serde(default)]
+    api_key: String,
 }
 
 #[derive(Serialize)]
@@ -94,11 +133,26 @@ struct ApiErrorBody {
 struct UpstreamModels {
     data: Vec<serde_json::Value>,
     models: Vec<String>,
+    model_configs: Vec<UpstreamModelInput>,
 }
 
 #[derive(Deserialize)]
-struct LogsQuery {
-    limit: Option<i64>,
+struct SaveUpstreamModelsRequest {
+    models: Vec<UpstreamModelInput>,
+}
+
+#[derive(Deserialize)]
+struct PageQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    q: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SettingsInput {
+    request_logging_enabled: bool,
+    upstream_timeout_seconds: i64,
+    log_error_max_chars: i64,
 }
 
 #[tokio::main]
@@ -140,22 +194,45 @@ fn build_router(state: AppState) -> Router {
         .route("/admin/api/init", post(admin_init))
         .route("/admin/api/login", post(admin_login))
         .route("/admin/api/logout", post(admin_logout))
-        .route("/admin/api/upstreams", get(list_upstreams).post(create_upstream))
+        .route(
+            "/admin/api/upstreams",
+            get(list_upstreams).post(create_upstream),
+        )
+        .route(
+            "/admin/api/upstreams/discover-models",
+            post(discover_upstream_models),
+        )
         .route(
             "/admin/api/upstreams/:id",
             put(update_upstream).delete(delete_upstream),
         )
-        .route("/admin/api/upstreams/:id/models", get(fetch_upstream_models))
-        .route("/admin/api/models", get(list_model_routes).post(create_model_route))
+        .route(
+            "/admin/api/upstreams/:id/models",
+            get(fetch_upstream_models).put(save_local_upstream_models),
+        )
+        .route(
+            "/admin/api/upstreams/:id/models/local",
+            get(list_local_upstream_models),
+        )
+        .route("/admin/api/available-models", get(list_available_models))
+        .route(
+            "/admin/api/models",
+            get(list_model_routes).post(create_model_route),
+        )
         .route(
             "/admin/api/models/:id",
             put(update_model_route).delete(delete_model_route),
         )
         .route("/admin/api/keys", get(list_api_keys).post(create_api_key))
+        .route("/admin/api/keys/:id/reveal", get(reveal_api_key))
         .route("/admin/api/keys/:id/enable", post(enable_api_key))
         .route("/admin/api/keys/:id/disable", post(disable_api_key))
         .route("/admin/api/keys/:id", delete(delete_api_key))
-        .route("/admin/api/logs", get(list_logs));
+        .route("/admin/api/logs", get(list_logs))
+        .route(
+            "/admin/api/settings",
+            get(get_settings).put(update_settings),
+        );
 
     let static_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("admin-ui")
@@ -206,7 +283,13 @@ async fn admin_status(State(state): State<AppState>, headers: HeaderMap) -> Resp
 
 async fn admin_init(State(state): State<AppState>, Json(req): Json<InitRequest>) -> Response {
     match state.db.has_admin().await {
-        Ok(true) => return api_error(StatusCode::CONFLICT, "ADMIN_ALREADY_INITIALIZED", "Admin already initialized"),
+        Ok(true) => {
+            return api_error(
+                StatusCode::CONFLICT,
+                "ADMIN_ALREADY_INITIALIZED",
+                "Admin already initialized",
+            )
+        }
         Ok(false) => {}
         Err(e) => return internal_error(e),
     }
@@ -222,11 +305,17 @@ async fn admin_init(State(state): State<AppState>, Json(req): Json<InitRequest>)
         Err(e) => return internal_error(e),
     };
     match state.db.create_admin(req.username.trim(), &hash).await {
-        Ok(user) => create_admin_session_response(&state, user.id, AdminUserView {
-            id: user.id,
-            username: user.username,
-        })
-        .await,
+        Ok(user) => {
+            create_admin_session_response(
+                &state,
+                user.id,
+                AdminUserView {
+                    id: user.id,
+                    username: user.username,
+                },
+            )
+            .await
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -234,16 +323,30 @@ async fn admin_init(State(state): State<AppState>, Json(req): Json<InitRequest>)
 async fn admin_login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> Response {
     let user = match state.db.find_admin_by_username(req.username.trim()).await {
         Ok(Some(user)) => user,
-        Ok(None) => return api_error(StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS", "Invalid credentials"),
+        Ok(None) => {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "INVALID_CREDENTIALS",
+                "Invalid credentials",
+            )
+        }
         Err(e) => return internal_error(e),
     };
     if !verify_password(&req.password, &user.password_hash) {
-        return api_error(StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS", "Invalid credentials");
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "INVALID_CREDENTIALS",
+            "Invalid credentials",
+        );
     }
-    create_admin_session_response(&state, user.id, AdminUserView {
-        id: user.id,
-        username: user.username,
-    })
+    create_admin_session_response(
+        &state,
+        user.id,
+        AdminUserView {
+            id: user.id,
+            username: user.username,
+        },
+    )
     .await
 }
 
@@ -259,12 +362,17 @@ async fn admin_logout(State(state): State<AppState>, headers: HeaderMap) -> Resp
     resp
 }
 
-async fn list_upstreams(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn list_upstreams(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PageQuery>,
+) -> Response {
     if let Err(resp) = require_admin(&state, &headers).await {
         return resp;
     }
-    match state.db.list_upstreams().await {
-        Ok(rows) => Json(rows).into_response(),
+    let params = page_params(query);
+    match state.db.list_upstreams_paged(&params).await {
+        Ok((rows, total)) => Json(paginated(rows, total, &params)).into_response(),
         Err(e) => internal_error(e),
     }
 }
@@ -280,12 +388,29 @@ async fn create_upstream(
     if let Err(resp) = validate_upstream_input(&input) {
         return resp;
     }
+    let mut discovered =
+        match fetch_models_from_upstream(&state.client, &input.base_url, &input.api_key).await {
+            Ok(models) => models.model_configs,
+            Err(resp) => return resp,
+        };
+    if let Some(configs) = input.model_configs.as_deref() {
+        merge_model_configs(&mut discovered, configs);
+    }
     let encrypted = match state.crypto.encrypt(&input.api_key) {
         Ok(v) => v,
         Err(e) => return internal_error(e),
     };
     match state.db.create_upstream(&input, encrypted).await {
-        Ok(row) => Json(row).into_response(),
+        Ok(row) => {
+            if let Err(e) = state
+                .db
+                .upsert_upstream_models(row.id, &discovered, input.models.as_deref())
+                .await
+            {
+                return internal_error(e);
+            }
+            Json(row).into_response()
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -311,7 +436,16 @@ async fn update_upstream(
         }
     };
     match state.db.update_upstream(id, &input, encrypted).await {
-        Ok(Some(row)) => Json(row).into_response(),
+        Ok(Some(row)) => {
+            if let Err(e) = state
+                .db
+                .set_upstream_enabled_models(row.id, input.models.as_deref())
+                .await
+            {
+                return internal_error(e);
+            }
+            Json(row).into_response()
+        }
         Ok(None) => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Upstream not found"),
         Err(e) => internal_error(e),
     }
@@ -349,41 +483,90 @@ async fn fetch_upstream_models(
         Ok(v) => v,
         Err(e) => return internal_error(e),
     };
-    let url = format!("{}models", join_base_str(&upstream.base_url));
-    let mut builder = state.client.get(url);
-    if !api_key.is_empty() {
-        builder = builder.bearer_auth(api_key);
-    }
-    match builder.send().await {
-        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
-            Ok(body) => {
-                let data = model_list_from_body(&body);
-                let models = data
-                    .iter()
-                    .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
-                    .collect();
-                Json(UpstreamModels { data, models }).into_response()
+    match fetch_models_from_upstream(&state.client, &upstream.base_url, &api_key).await {
+        Ok(models) => {
+            if let Err(e) = state
+                .db
+                .sync_upstream_model_inventory(upstream.id, &models.model_configs)
+                .await
+            {
+                return internal_error(e);
             }
-            Err(e) => internal_error(e),
-        },
-        Ok(r) => {
-            let status = r.status();
-            let body = r.text().await.unwrap_or_default();
-            (
-                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                body,
-            )
-                .into_response()
+            Json(models).into_response()
         }
-        Err(e) => api_error(StatusCode::BAD_GATEWAY, "UPSTREAM_CONNECTION_ERROR", e.to_string()),
+        Err(resp) => resp,
     }
 }
 
-async fn list_model_routes(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn list_local_upstream_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
     if let Err(resp) = require_admin(&state, &headers).await {
         return resp;
     }
-    match state.db.list_model_routes(false).await {
+    match state.db.list_local_upstream_models(id).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => internal_error(e),
+    }
+}
+
+async fn save_local_upstream_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<SaveUpstreamModelsRequest>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers).await {
+        return resp;
+    }
+    match state.db.save_upstream_models(id, &input.models).await {
+        Ok(()) => match state.db.list_local_upstream_models(id).await {
+            Ok(rows) => Json(rows).into_response(),
+            Err(e) => internal_error(e),
+        },
+        Err(e) => internal_error(e),
+    }
+}
+
+async fn discover_upstream_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<DiscoverModelsInput>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers).await {
+        return resp;
+    }
+    if let Err(e) = validate_upstream(input.base_url.trim()) {
+        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", e.to_string());
+    }
+    match fetch_models_from_upstream(&state.client, &input.base_url, &input.api_key).await {
+        Ok(models) => Json(models).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+async fn list_model_routes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers).await {
+        return resp;
+    }
+    let params = page_params(query);
+    match state.db.list_model_routes_paged(&params).await {
+        Ok((rows, total)) => Json(paginated(rows, total, &params)).into_response(),
+        Err(e) => internal_error(e),
+    }
+}
+
+async fn list_available_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = require_admin(&state, &headers).await {
+        return resp;
+    }
+    match state.db.list_available_models_for_key(None).await {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => internal_error(e),
     }
@@ -440,12 +623,23 @@ async fn delete_model_route(
     }
 }
 
-async fn list_api_keys(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn list_api_keys(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PageQuery>,
+) -> Response {
     if let Err(resp) = require_admin(&state, &headers).await {
         return resp;
     }
-    match state.db.list_api_keys().await {
-        Ok(rows) => Json(rows).into_response(),
+    let params = page_params(query);
+    match state.db.list_api_keys_paged(&params).await {
+        Ok((rows, total)) => {
+            let rows: Vec<_> = rows
+                .into_iter()
+                .map(|(key, models)| api_key_view(&state, key, models))
+                .collect();
+            Json(paginated(rows, total, &params)).into_response()
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -463,12 +657,53 @@ async fn create_api_key(
     }
     let key = generate_api_key();
     let key_hash = state.crypto.hash_api_key(&key);
-    match state.db.create_api_key(&input, &key_hash).await {
+    let encrypted_key = match state.crypto.encrypt(&key) {
+        Ok(value) => value,
+        Err(e) => return internal_error(e),
+    };
+    match state
+        .db
+        .create_api_key(&input, &key_hash, encrypted_key)
+        .await
+    {
         Ok(row) => Json(CreatedApiKey {
             id: row.id,
             name: row.name,
             enabled: row.enabled,
             created_at: row.created_at,
+            masked_key: mask_api_key(&key),
+            models: input.models.unwrap_or_default(),
+            key,
+        })
+        .into_response(),
+        Err(e) => internal_error(e),
+    }
+}
+
+async fn reveal_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers).await {
+        return resp;
+    }
+    let Some(row) = (match state.db.get_api_key(id).await {
+        Ok(row) => row,
+        Err(e) => return internal_error(e),
+    }) else {
+        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "API key not found");
+    };
+    let Some(encrypted_key) = row.encrypted_key else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "KEY_NOT_RECOVERABLE",
+            "This API key was created before encrypted key storage was enabled",
+        );
+    };
+    match state.crypto.decrypt(&encrypted_key) {
+        Ok(key) => Json(RevealedApiKey {
+            masked_key: mask_api_key(&key),
             key,
         })
         .into_response(),
@@ -524,13 +759,46 @@ async fn delete_api_key(
 async fn list_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<LogsQuery>,
+    Query(query): Query<PageQuery>,
 ) -> Response {
     if let Err(resp) = require_admin(&state, &headers).await {
         return resp;
     }
-    match state.db.list_request_logs(query.limit.unwrap_or(100)).await {
-        Ok(rows) => Json(rows).into_response(),
+    let params = page_params(query);
+    match state.db.list_request_logs_paged(&params).await {
+        Ok((rows, total)) => Json(paginated(rows, total, &params)).into_response(),
+        Err(e) => internal_error(e),
+    }
+}
+
+async fn get_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = require_admin(&state, &headers).await {
+        return resp;
+    }
+    match state.db.get_app_settings().await {
+        Ok(settings) => Json(settings).into_response(),
+        Err(e) => internal_error(e),
+    }
+}
+
+async fn update_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SettingsInput>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers).await {
+        return resp;
+    }
+    let settings = AppSettings {
+        request_logging_enabled: input.request_logging_enabled,
+        upstream_timeout_seconds: input.upstream_timeout_seconds,
+        log_error_max_chars: input.log_error_max_chars,
+    };
+    if let Err(resp) = validate_settings(&settings) {
+        return resp;
+    }
+    match state.db.save_app_settings(&settings).await {
+        Ok(settings) => Json(settings).into_response(),
         Err(e) => internal_error(e),
     }
 }
@@ -541,15 +809,15 @@ async fn handle_models(State(state): State<AppState>, headers: HeaderMap) -> Res
         Err(resp) => return resp,
     };
     let _ = state.db.mark_api_key_used(auth.id).await;
-    match state.db.list_model_routes(true).await {
-        Ok(routes) => {
-            let data: Vec<_> = routes
+    match state.db.list_available_models_for_key(Some(auth.id)).await {
+        Ok(models) => {
+            let data: Vec<_> = models
                 .iter()
-                .map(|route| {
+                .map(|model| {
                     serde_json::json!({
-                        "id": route.public_model,
+                        "id": model.id,
                         "object": "model",
-                        "owned_by": route.upstream_name,
+                        "owned_by": model.owner,
                     })
                 })
                 .collect();
@@ -580,7 +848,11 @@ async fn handle_responses(
         Ok(r) => r,
         Err(e) => {
             error!("JSON parse error: {e}");
-            return api_error(StatusCode::UNPROCESSABLE_ENTITY, "INVALID_REQUEST_BODY", e.to_string());
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "INVALID_REQUEST_BODY",
+                e.to_string(),
+            );
         }
     };
 
@@ -589,13 +861,14 @@ async fn handle_responses(
         auth.name, req.model, req.stream
     );
 
-    let Some(route) = (match state.db.find_model_route(&req.model).await {
+    let candidates = match state.db.list_route_candidates(auth.id, &req.model).await {
         Ok(v) => v,
         Err(e) => return internal_error(e),
-    }) else {
-        let _ = state
-            .db
-            .insert_request_log(LogInput {
+    };
+    let Some(route) = choose_route_candidate(candidates) else {
+        write_request_log(
+            &state.db,
+            LogInput {
                 api_key_id: Some(auth.id),
                 public_model: Some(req.model.clone()),
                 upstream_id: None,
@@ -606,19 +879,32 @@ async fn handle_responses(
                 total_tokens: 0,
                 error: Some("unknown or disabled model".into()),
                 duration_ms: started.elapsed().as_millis() as i64,
-            })
-            .await;
-        return api_error(StatusCode::BAD_REQUEST, "UNKNOWN_MODEL", "Unknown or disabled model");
+            },
+        )
+        .await;
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "UNKNOWN_MODEL",
+            "Unknown or disabled model",
+        );
     };
 
     let Some(upstream) = (match state.db.get_upstream(route.upstream_id).await {
         Ok(v) => v,
         Err(e) => return internal_error(e),
     }) else {
-        return api_error(StatusCode::BAD_GATEWAY, "UPSTREAM_NOT_FOUND", "Upstream not found");
+        return api_error(
+            StatusCode::BAD_GATEWAY,
+            "UPSTREAM_NOT_FOUND",
+            "Upstream not found",
+        );
     };
     if !upstream.enabled {
-        return api_error(StatusCode::BAD_GATEWAY, "UPSTREAM_DISABLED", "Upstream disabled");
+        return api_error(
+            StatusCode::BAD_GATEWAY,
+            "UPSTREAM_DISABLED",
+            "Upstream disabled",
+        );
     }
 
     let upstream_key = match state.crypto.decrypt(&upstream.encrypted_api_key) {
@@ -652,7 +938,11 @@ struct ProxyTarget {
     started: Instant,
 }
 
-async fn handle_responses_inner(state: AppState, req: ResponsesRequest, target: ProxyTarget) -> Response {
+async fn handle_responses_inner(
+    state: AppState,
+    req: ResponsesRequest,
+    target: ProxyTarget,
+) -> Response {
     let history = req
         .previous_response_id
         .as_deref()
@@ -670,6 +960,10 @@ async fn handle_responses_inner(state: AppState, req: ResponsesRequest, target: 
         let response_id = state.sessions.new_id();
         chat_req.stream = true;
         let request_messages = chat_req.messages.clone();
+        let settings = match state.db.get_app_settings().await {
+            Ok(settings) => settings,
+            Err(e) => return internal_error(e),
+        };
         stream::translate_stream(stream::StreamArgs {
             client: state.client,
             url: target.upstream_url.clone(),
@@ -679,6 +973,7 @@ async fn handle_responses_inner(state: AppState, req: ResponsesRequest, target: 
             sessions: state.sessions,
             request_messages,
             model: target.public_model.clone(),
+            upstream_timeout_seconds: settings.upstream_timeout_seconds,
             on_complete: Some(stream_log_callback(state.db.clone(), target)),
         })
         .into_response()
@@ -703,16 +998,20 @@ fn stream_log_callback(
             input_tokens: 0,
             output_tokens: 0,
             total_tokens: 0,
-            error: entry.error.map(|e| e.chars().take(500).collect()),
+            error: entry.error,
             duration_ms: target.started.elapsed().as_millis() as i64,
         };
         tokio::spawn(async move {
-            let _ = db.insert_request_log(input).await;
+            write_request_log(&db, input).await;
         });
     })
 }
 
-async fn handle_blocking(state: AppState, chat_req: types::ChatRequest, target: ProxyTarget) -> Response {
+async fn handle_blocking(
+    state: AppState,
+    chat_req: types::ChatRequest,
+    target: ProxyTarget,
+) -> Response {
     let mut builder = state
         .client
         .post(&target.upstream_url)
@@ -722,11 +1021,32 @@ async fn handle_blocking(state: AppState, chat_req: types::ChatRequest, target: 
         builder = builder.bearer_auth(target.upstream_api_key.as_str());
     }
 
+    let settings = match state.db.get_app_settings().await {
+        Ok(settings) => settings,
+        Err(e) => return internal_error(e),
+    };
+    if settings.upstream_timeout_seconds > 0 {
+        builder = builder.timeout(StdDuration::from_secs(
+            settings.upstream_timeout_seconds as u64,
+        ));
+    }
+
     match builder.json(&chat_req).send().await {
         Err(e) => {
             error!("upstream error: {e}");
-            log_request(&state, &target, StatusCode::BAD_GATEWAY, None, Some(e.to_string())).await;
-            api_error(StatusCode::BAD_GATEWAY, "UPSTREAM_CONNECTION_ERROR", e.to_string())
+            log_request(
+                &state,
+                &target,
+                StatusCode::BAD_GATEWAY,
+                None,
+                Some(e.to_string()),
+            )
+            .await;
+            api_error(
+                StatusCode::BAD_GATEWAY,
+                "UPSTREAM_CONNECTION_ERROR",
+                e.to_string(),
+            )
         }
         Ok(r) if !r.status().is_success() => {
             let status = r.status();
@@ -742,8 +1062,19 @@ async fn handle_blocking(state: AppState, chat_req: types::ChatRequest, target: 
         Ok(r) => match r.json::<ChatResponse>().await {
             Err(e) => {
                 error!("parse error: {e}");
-                log_request(&state, &target, StatusCode::INTERNAL_SERVER_ERROR, None, Some(e.to_string())).await;
-                api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", e.to_string())
+                log_request(
+                    &state,
+                    &target,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    None,
+                    Some(e.to_string()),
+                )
+                .await;
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    e.to_string(),
+                )
             }
             Ok(chat_resp) => {
                 let usage = chat_resp.usage.as_ref().map(|u| {
@@ -770,7 +1101,8 @@ async fn handle_blocking(state: AppState, chat_req: types::ChatRequest, target: 
                 full_history.push(assistant_msg);
                 let response_id = state.sessions.save(full_history);
 
-                let (resp, _) = translate::from_chat_response(response_id, &target.public_model, chat_resp);
+                let (resp, _) =
+                    translate::from_chat_response(response_id, &target.public_model, chat_resp);
                 log_request(&state, &target, StatusCode::OK, usage, None).await;
                 Json(resp).into_response()
             }
@@ -786,10 +1118,9 @@ async fn log_request(
     error: Option<String>,
 ) {
     let (input_tokens, output_tokens, total_tokens) = usage.unwrap_or((0, 0, 0));
-    let error = error.map(|e| e.chars().take(500).collect());
-    let _ = state
-        .db
-        .insert_request_log(LogInput {
+    write_request_log(
+        &state.db,
+        LogInput {
             api_key_id: Some(target.api_key_id),
             public_model: Some(target.public_model.clone()),
             upstream_id: Some(target.upstream_id),
@@ -800,8 +1131,22 @@ async fn log_request(
             total_tokens,
             error,
             duration_ms: target.started.elapsed().as_millis() as i64,
-        })
-        .await;
+        },
+    )
+    .await;
+}
+
+async fn write_request_log(db: &Db, mut input: LogInput) {
+    let settings = match db.get_app_settings().await {
+        Ok(settings) => settings,
+        Err(_) => return,
+    };
+    if !settings.request_logging_enabled {
+        return;
+    }
+    let max_chars = settings.log_error_max_chars.max(0) as usize;
+    input.error = input.error.map(|e| e.chars().take(max_chars).collect());
+    let _ = db.insert_request_log(input).await;
 }
 
 async fn authenticate_api_key(
@@ -809,13 +1154,25 @@ async fn authenticate_api_key(
     headers: &HeaderMap,
 ) -> std::result::Result<db::ApiKeyRecord, Response> {
     let Some(raw) = bearer_token(headers) else {
-        return Err(api_error(StatusCode::UNAUTHORIZED, "MISSING_API_KEY", "Missing API key"));
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "MISSING_API_KEY",
+            "Missing API key",
+        ));
     };
     let hash = state.crypto.hash_api_key(&raw);
     match state.db.find_api_key_by_hash(&hash).await {
         Ok(Some(record)) if record.enabled => Ok(record),
-        Ok(Some(_)) => Err(api_error(StatusCode::UNAUTHORIZED, "DISABLED_API_KEY", "Disabled API key")),
-        Ok(None) => Err(api_error(StatusCode::UNAUTHORIZED, "INVALID_API_KEY", "Invalid API key")),
+        Ok(Some(_)) => Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "DISABLED_API_KEY",
+            "Disabled API key",
+        )),
+        Ok(None) => Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "INVALID_API_KEY",
+            "Invalid API key",
+        )),
         Err(e) => Err(internal_error(e)),
     }
 }
@@ -829,6 +1186,94 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn choose_route_candidate(mut candidates: Vec<db::RouteCandidate>) -> Option<db::RouteCandidate> {
+    match candidates.len() {
+        0 => None,
+        1 => candidates.pop(),
+        len => {
+            use argon2::password_hash::rand_core::{OsRng, RngCore};
+            let mut rng = OsRng;
+            let index = (rng.next_u64() as usize) % len;
+            Some(candidates.swap_remove(index))
+        }
+    }
+}
+
+fn page_params(query: PageQuery) -> PageParams {
+    PageParams::new(
+        query.page.unwrap_or(1),
+        query.page_size.unwrap_or(20),
+        query.q,
+    )
+}
+
+fn paginated<T>(items: Vec<T>, total: i64, params: &PageParams) -> Paginated<T> {
+    let total_pages = if total == 0 {
+        0
+    } else {
+        (total + params.page_size - 1) / params.page_size
+    };
+    Paginated {
+        items,
+        total,
+        page: params.page,
+        page_size: params.page_size,
+        total_pages,
+    }
+}
+
+fn validate_settings(settings: &AppSettings) -> std::result::Result<(), Response> {
+    if !(0..=600).contains(&settings.upstream_timeout_seconds) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "upstream_timeout_seconds must be between 0 and 600",
+        ));
+    }
+    if !(100..=10_000).contains(&settings.log_error_max_chars) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "log_error_max_chars must be between 100 and 10000",
+        ));
+    }
+    Ok(())
+}
+
+fn api_key_view(state: &AppState, key: db::ApiKeyRecord, models: Vec<String>) -> ApiKeyView {
+    let decrypted = key
+        .encrypted_key
+        .as_deref()
+        .and_then(|value| state.crypto.decrypt(value).ok());
+    ApiKeyView {
+        id: key.id,
+        name: key.name,
+        enabled: key.enabled,
+        created_at: key.created_at,
+        last_used_at: key.last_used_at,
+        masked_key: decrypted.as_deref().map(mask_api_key),
+        key_recoverable: decrypted.is_some(),
+        models,
+    }
+}
+
+fn mask_api_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 12 {
+        return "••••".to_string();
+    }
+    let start: String = chars.iter().take(6).collect();
+    let end: String = chars
+        .iter()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{start}••••••{end}")
+}
+
 async fn current_admin(state: &AppState, headers: &HeaderMap) -> Result<Option<db::AdminUser>> {
     let Some(token) = session_cookie(headers) else {
         return Ok(None);
@@ -837,7 +1282,10 @@ async fn current_admin(state: &AppState, headers: &HeaderMap) -> Result<Option<d
     state.db.admin_for_session(&hash).await
 }
 
-async fn require_admin(state: &AppState, headers: &HeaderMap) -> std::result::Result<db::AdminUser, Response> {
+async fn require_admin(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> std::result::Result<db::AdminUser, Response> {
     match current_admin(state, headers).await {
         Ok(Some(user)) => Ok(user),
         Ok(None) => Err(api_error(
@@ -892,7 +1340,9 @@ fn set_session_cookie(headers: &mut HeaderMap, token: &str) {
 fn clear_session_cookie(headers: &mut HeaderMap) {
     headers.insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("chat2responses_admin=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"),
+        HeaderValue::from_static(
+            "chat2responses_admin=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
+        ),
     );
 }
 
@@ -929,12 +1379,121 @@ fn join_base_str(url: &str) -> String {
     }
 }
 
+async fn fetch_models_from_upstream(
+    client: &Client,
+    base_url: &str,
+    api_key: &str,
+) -> std::result::Result<UpstreamModels, Response> {
+    let url = format!(
+        "{}models",
+        join_base_str(base_url.trim().trim_end_matches('/'))
+    );
+    let mut builder = client.get(url);
+    if !api_key.trim().is_empty() {
+        builder = builder.bearer_auth(api_key.trim());
+    }
+    match builder.send().await {
+        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+            Ok(body) => {
+                let data = model_list_from_body(&body);
+                let mut model_configs: Vec<UpstreamModelInput> =
+                    data.iter().filter_map(model_config_from_value).collect();
+                model_configs.sort_by(|a, b| a.model.cmp(&b.model));
+                model_configs.dedup_by(|a, b| a.model == b.model);
+                let models = model_configs
+                    .iter()
+                    .map(|model| model.model.clone())
+                    .collect();
+                Ok(UpstreamModels {
+                    data,
+                    models,
+                    model_configs,
+                })
+            }
+            Err(e) => Err(internal_error(e)),
+        },
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            Err((
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                body,
+            )
+                .into_response())
+        }
+        Err(e) => Err(api_error(
+            StatusCode::BAD_GATEWAY,
+            "UPSTREAM_CONNECTION_ERROR",
+            e.to_string(),
+        )),
+    }
+}
+
 fn model_list_from_body(body: &serde_json::Value) -> Vec<serde_json::Value> {
     body.get("data")
         .or_else(|| body.get("models"))
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default()
+}
+
+fn model_config_from_value(value: &serde_json::Value) -> Option<UpstreamModelInput> {
+    let model = value
+        .get("id")
+        .and_then(|id| id.as_str())
+        .or_else(|| value.as_str())?
+        .trim();
+    if model.is_empty() {
+        return None;
+    }
+    let context_window = json_i64(
+        value,
+        &["context_window", "context_length", "max_context_window"],
+    )
+    .unwrap_or(128_000);
+    let max_context_window =
+        json_i64(value, &["max_context_window", "max_context_length"]).unwrap_or(context_window);
+    Some(UpstreamModelInput {
+        model: model.to_string(),
+        enabled: true,
+        context_window,
+        max_context_window,
+        supports_parallel_tool_calls: json_bool(
+            value,
+            &["supports_parallel_tool_calls", "parallel_tool_calls"],
+        )
+        .unwrap_or(true),
+        supports_reasoning_summaries: json_bool(
+            value,
+            &["supports_reasoning_summaries", "reasoning_summaries"],
+        )
+        .unwrap_or(false),
+    })
+}
+
+fn json_i64(value: &serde_json::Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|item| item.as_i64()))
+}
+
+fn json_bool(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|item| item.as_bool()))
+}
+
+fn merge_model_configs(base: &mut [UpstreamModelInput], overrides: &[UpstreamModelInput]) {
+    for item in base {
+        if let Some(override_item) = overrides
+            .iter()
+            .find(|candidate| candidate.model.trim() == item.model)
+        {
+            item.enabled = override_item.enabled;
+            item.context_window = override_item.context_window.max(1);
+            item.max_context_window = override_item.max_context_window.max(1);
+            item.supports_parallel_tool_calls = override_item.supports_parallel_tool_calls;
+            item.supports_reasoning_summaries = override_item.supports_reasoning_summaries;
+        }
+    }
 }
 
 async fn handle_fallback(req: Request<Body>) -> Response {
@@ -946,12 +1505,23 @@ async fn handle_fallback(req: Request<Body>) -> Response {
 }
 
 fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>) -> Response {
-    (status, Json(ApiErrorBody { code, message: message.into() })).into_response()
+    (
+        status,
+        Json(ApiErrorBody {
+            code,
+            message: message.into(),
+        }),
+    )
+        .into_response()
 }
 
 fn internal_error(err: impl std::fmt::Display) -> Response {
     error!("{err}");
-    api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", err.to_string())
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INTERNAL_ERROR",
+        err.to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -972,13 +1542,19 @@ mod tests {
 
     #[test]
     fn test_join_base_adds_trailing_slash() {
-        assert_eq!(join_base_str("https://api.example.com/v1"), "https://api.example.com/v1/");
+        assert_eq!(
+            join_base_str("https://api.example.com/v1"),
+            "https://api.example.com/v1/"
+        );
     }
 
     #[test]
     fn test_bearer_token() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer cr_test"));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer cr_test"),
+        );
         assert_eq!(bearer_token(&headers).as_deref(), Some("cr_test"));
     }
 
@@ -990,15 +1566,84 @@ mod tests {
         assert_eq!(model_list_from_body(&models)[0]["id"], "b");
     }
 
+    #[test]
+    fn test_validate_settings_bounds() {
+        assert!(validate_settings(&AppSettings::default()).is_ok());
+        assert!(validate_settings(&AppSettings {
+            request_logging_enabled: true,
+            upstream_timeout_seconds: 601,
+            log_error_max_chars: 500,
+        })
+        .is_err());
+        assert!(validate_settings(&AppSettings {
+            request_logging_enabled: true,
+            upstream_timeout_seconds: 60,
+            log_error_max_chars: 99,
+        })
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_write_request_log_obeys_settings() {
+        let db = Db::connect("sqlite::memory:").await.unwrap();
+
+        write_request_log(&db, test_log_input("x".repeat(200))).await;
+        let (rows, total) = db
+            .list_request_logs_paged(&PageParams::new(1, 10, None))
+            .await
+            .unwrap();
+        assert_eq!(total, 0);
+        assert!(rows.is_empty());
+
+        db.save_app_settings(&AppSettings {
+            request_logging_enabled: true,
+            upstream_timeout_seconds: 0,
+            log_error_max_chars: 100,
+        })
+        .await
+        .unwrap();
+        write_request_log(&db, test_log_input("x".repeat(200))).await;
+        let (rows, total) = db
+            .list_request_logs_paged(&PageParams::new(1, 10, None))
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].error.as_ref().unwrap().chars().count(), 100);
+    }
+
+    fn test_log_input(error: String) -> LogInput {
+        LogInput {
+            api_key_id: None,
+            public_model: Some("public".into()),
+            upstream_id: None,
+            upstream_model: None,
+            status_code: 500,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            error: Some(error),
+            duration_ms: 10,
+        }
+    }
+
     #[tokio::test]
     async fn test_api_error_shape() {
-        let resp = api_error(StatusCode::UNAUTHORIZED, "INVALID_API_KEY", "Invalid API key");
+        let resp = api_error(
+            StatusCode::UNAUTHORIZED,
+            "INVALID_API_KEY",
+            "Invalid API key",
+        );
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json, serde_json::json!({
-            "code": "INVALID_API_KEY",
-            "message": "Invalid API key"
-        }));
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "code": "INVALID_API_KEY",
+                "message": "Invalid API key"
+            })
+        );
     }
 }

@@ -22,8 +22,8 @@ export const Toast = React.forwardRef<
   <ToastPrimitive.Root
     ref={ref}
     className={cn(
-      "rounded-lg border bg-card px-4 py-3 text-sm shadow-panel",
-      tone === "ok" ? "border-emerald-200 text-emerald-800" : "border-red-200 text-red-800",
+      "rounded-2xl border px-4 py-3 text-sm shadow-panel backdrop-blur-2xl",
+      tone === "ok" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-red-200 bg-red-50 text-red-800",
       className
     )}
     {...props}

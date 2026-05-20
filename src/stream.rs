@@ -8,6 +8,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tokio::time::{timeout, Duration};
 use tracing::{error, warn};
 
 use crate::{
@@ -27,6 +28,7 @@ pub struct StreamArgs {
     /// recovered when Codex replays the conversation without previous_response_id.
     pub request_messages: Vec<ChatMessage>,
     pub model: String,
+    pub upstream_timeout_seconds: i64,
     pub on_complete: Option<Arc<dyn Fn(StreamLog) + Send + Sync>>,
 }
 
@@ -45,8 +47,9 @@ struct ToolCallAccum {
 /// Translate an upstream Chat Completions SSE stream into a Responses API SSE stream.
 ///
 /// Text response event sequence:
-///   response.created → response.output_item.added (message) → response.output_text.delta*
-///   → response.output_item.done → response.completed
+///   response.created → [optional reasoning summary events] →
+///   response.output_item.added (message) → response.output_text.delta* →
+///   response.output_item.done → response.completed
 ///
 /// Tool call response event sequence:
 ///   response.created → [accumulate deltas] → response.output_item.added (function_call)
@@ -63,9 +66,11 @@ pub fn translate_stream(
         sessions,
         request_messages,
         model,
+        upstream_timeout_seconds,
         on_complete,
     } = args;
     let msg_item_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let reasoning_item_id = format!("rs_{}", uuid::Uuid::new_v4().simple());
 
     let event_stream = stream! {
         yield Ok(Event::default()
@@ -79,8 +84,30 @@ pub fn translate_stream(
         if !api_key.is_empty() {
             builder = builder.bearer_auth(api_key.as_str());
         }
+        let send = builder.json(&chat_req).send();
+        let upstream_result = if upstream_timeout_seconds > 0 {
+            match timeout(Duration::from_secs(upstream_timeout_seconds as u64), send).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let message = "upstream request timed out".to_string();
+                    error!("{message}");
+                    if let Some(callback) = &on_complete {
+                        callback(StreamLog {
+                            status_code: 502,
+                            error: Some(message.clone()),
+                        });
+                    }
+                    yield Ok(Event::default().event("response.failed").data(
+                        json!({"type": "response.failed", "response": {"id": &response_id, "status": "failed", "error": {"code": "connection_timeout", "message": message}}}).to_string()
+                    ));
+                    return;
+                }
+            }
+        } else {
+            send.await
+        };
 
-        let upstream = match builder.json(&chat_req).send().await {
+        let upstream = match upstream_result {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 let status = r.status();
@@ -116,6 +143,9 @@ pub fn translate_stream(
         let mut accumulated_reasoning = String::new();
         let mut tool_calls: BTreeMap<usize, ToolCallAccum> = BTreeMap::new();
         let mut emitted_message_item = false;
+        let mut emitted_reasoning_item = false;
+        let mut completed_reasoning_item = false;
+        let mut emitted_text_part = false;
         let mut stream_done = false;
         let mut source = upstream.bytes_stream().eventsource();
 
@@ -138,19 +168,90 @@ pub fn translate_stream(
                                 // Reasoning/thinking content (kimi-k2.6 etc.)
                                 if let Some(rc) = choice.delta.reasoning_content.as_deref() {
                                     if !rc.is_empty() {
+                                        if !emitted_reasoning_item {
+                                            yield Ok(Event::default()
+                                                .event("response.output_item.added")
+                                                .data(json!({
+                                                    "type": "response.output_item.added",
+                                                    "output_index": 0,
+                                                    "item": {
+                                                        "type": "reasoning",
+                                                        "id": &reasoning_item_id,
+                                                        "summary": []
+                                                    }
+                                                }).to_string()));
+                                            yield Ok(Event::default()
+                                                .event("response.reasoning_summary_part.added")
+                                                .data(json!({
+                                                    "type": "response.reasoning_summary_part.added",
+                                                    "item_id": &reasoning_item_id,
+                                                    "output_index": 0,
+                                                    "summary_index": 0,
+                                                    "part": {
+                                                        "type": "summary_text",
+                                                        "text": ""
+                                                    }
+                                                }).to_string()));
+                                            emitted_reasoning_item = true;
+                                        }
                                         accumulated_reasoning.push_str(rc);
+                                        yield Ok(Event::default()
+                                            .event("response.reasoning_summary_text.delta")
+                                            .data(json!({
+                                                "type": "response.reasoning_summary_text.delta",
+                                                "item_id": &reasoning_item_id,
+                                                "output_index": 0,
+                                                "summary_index": 0,
+                                                "delta": rc
+                                            }).to_string()));
                                     }
                                 }
 
                                 // Text content
                                 let content = choice.delta.content.as_deref().unwrap_or("");
                                 if !content.is_empty() {
+                                    let msg_output_index = if emitted_reasoning_item { 1 } else { 0 };
+                                    if emitted_reasoning_item && !completed_reasoning_item {
+                                        yield Ok(Event::default()
+                                            .event("response.reasoning_summary_text.done")
+                                            .data(json!({
+                                                "type": "response.reasoning_summary_text.done",
+                                                "item_id": &reasoning_item_id,
+                                                "output_index": 0,
+                                                "summary_index": 0,
+                                                "text": &accumulated_reasoning
+                                            }).to_string()));
+                                        yield Ok(Event::default()
+                                            .event("response.reasoning_summary_part.done")
+                                            .data(json!({
+                                                "type": "response.reasoning_summary_part.done",
+                                                "item_id": &reasoning_item_id,
+                                                "output_index": 0,
+                                                "summary_index": 0,
+                                                "part": {
+                                                    "type": "summary_text",
+                                                    "text": &accumulated_reasoning
+                                                }
+                                            }).to_string()));
+                                        yield Ok(Event::default()
+                                            .event("response.output_item.done")
+                                            .data(json!({
+                                                "type": "response.output_item.done",
+                                                "output_index": 0,
+                                                "item": {
+                                                    "type": "reasoning",
+                                                    "id": &reasoning_item_id,
+                                                    "summary": [{"type": "summary_text", "text": &accumulated_reasoning}]
+                                                }
+                                            }).to_string()));
+                                        completed_reasoning_item = true;
+                                    }
                                     if !emitted_message_item {
                                         yield Ok(Event::default()
                                             .event("response.output_item.added")
                                             .data(json!({
                                                 "type": "response.output_item.added",
-                                                "output_index": 0,
+                                                "output_index": msg_output_index,
                                                 "item": {
                                                     "type": "message",
                                                     "id": &msg_item_id,
@@ -161,13 +262,29 @@ pub fn translate_stream(
                                             }).to_string()));
                                         emitted_message_item = true;
                                     }
+                                    if !emitted_text_part {
+                                        yield Ok(Event::default()
+                                            .event("response.content_part.added")
+                                            .data(json!({
+                                                "type": "response.content_part.added",
+                                                "item_id": &msg_item_id,
+                                                "output_index": msg_output_index,
+                                                "content_index": 0,
+                                                "part": {
+                                                    "type": "output_text",
+                                                    "text": ""
+                                                }
+                                            }).to_string()));
+                                        emitted_text_part = true;
+                                    }
                                     accumulated_text.push_str(content);
                                     yield Ok(Event::default()
                                         .event("response.output_text.delta")
                                         .data(json!({
                                             "type": "response.output_text.delta",
                                             "item_id": &msg_item_id,
-                                            "output_index": 0,
+                                            "output_index": msg_output_index,
+                                            "content_index": 0,
                                             "delta": content
                                         }).to_string()));
                                 }
@@ -204,12 +321,71 @@ pub fn translate_stream(
             }
         }
 
-        if let Some(msg_item_id) = (emitted_message_item).then(|| msg_item_id.clone()) {
+        if emitted_reasoning_item && !completed_reasoning_item {
+            yield Ok(Event::default()
+                .event("response.reasoning_summary_text.done")
+                .data(json!({
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": &reasoning_item_id,
+                    "output_index": 0,
+                    "summary_index": 0,
+                    "text": &accumulated_reasoning
+                }).to_string()));
+            yield Ok(Event::default()
+                .event("response.reasoning_summary_part.done")
+                .data(json!({
+                    "type": "response.reasoning_summary_part.done",
+                    "item_id": &reasoning_item_id,
+                    "output_index": 0,
+                    "summary_index": 0,
+                    "part": {
+                        "type": "summary_text",
+                        "text": &accumulated_reasoning
+                    }
+                }).to_string()));
             yield Ok(Event::default()
                 .event("response.output_item.done")
                 .data(json!({
                     "type": "response.output_item.done",
                     "output_index": 0,
+                    "item": {
+                        "type": "reasoning",
+                        "id": &reasoning_item_id,
+                        "summary": [{"type": "summary_text", "text": &accumulated_reasoning}]
+                    }
+                }).to_string()));
+        }
+
+        if let Some(msg_item_id) = (emitted_message_item).then(|| msg_item_id.clone()) {
+            let msg_output_index = if emitted_reasoning_item { 1 } else { 0 };
+            if emitted_text_part {
+                yield Ok(Event::default()
+                    .event("response.output_text.done")
+                    .data(json!({
+                        "type": "response.output_text.done",
+                        "item_id": &msg_item_id,
+                        "output_index": msg_output_index,
+                        "content_index": 0,
+                        "text": &accumulated_text
+                    }).to_string()));
+                yield Ok(Event::default()
+                    .event("response.content_part.done")
+                    .data(json!({
+                        "type": "response.content_part.done",
+                        "item_id": &msg_item_id,
+                        "output_index": msg_output_index,
+                        "content_index": 0,
+                        "part": {
+                            "type": "output_text",
+                            "text": &accumulated_text
+                        }
+                    }).to_string()));
+            }
+            yield Ok(Event::default()
+                .event("response.output_item.done")
+                .data(json!({
+                    "type": "response.output_item.done",
+                    "output_index": msg_output_index,
                     "item": {
                         "type": "message",
                         "id": &msg_item_id,
@@ -221,7 +397,7 @@ pub fn translate_stream(
         }
 
         // Emit function_call items for each accumulated tool call
-        let base_index: usize = if emitted_message_item { 1 } else { 0 };
+        let base_index: usize = usize::from(emitted_reasoning_item) + usize::from(emitted_message_item);
         let mut fc_items: Vec<Value> = Vec::new();
 
         for (rel_idx, (_, tc)) in tool_calls.iter().enumerate() {
@@ -321,6 +497,13 @@ pub fn translate_stream(
 
             // Build output array for response.completed
             let mut output_items: Vec<Value> = Vec::new();
+            if emitted_reasoning_item {
+                output_items.push(json!({
+                    "type": "reasoning",
+                    "id": &reasoning_item_id,
+                    "summary": [{"type": "summary_text", "text": &accumulated_reasoning}]
+                }));
+            }
             if emitted_message_item {
                 output_items.push(json!({
                     "type": "message",

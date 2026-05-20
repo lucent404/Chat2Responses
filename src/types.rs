@@ -54,8 +54,23 @@ pub struct ResponsesResponse {
 pub struct ResponsesOutputItem {
     #[serde(rename = "type")]
     pub kind: String,
-    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub content: Vec<ContentPart>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub summary: Vec<ReasoningSummaryPart>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReasoningSummaryPart {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub text: String,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -105,10 +120,7 @@ impl ChatMessage {
     /// non-string, or multimodal payloads — callers that care about the
     /// multimodal parts should look at `content` directly.
     pub fn text_content(&self) -> &str {
-        self.content
-            .as_ref()
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
+        self.content.as_ref().and_then(|v| v.as_str()).unwrap_or("")
     }
 }
 

@@ -49,7 +49,12 @@ impl SessionStore {
 
     /// Store reasoning_content for an assistant turn, keyed by a fingerprint
     /// of the assistant message content and tool calls.
-    pub fn store_turn_reasoning(&self, _prior: &[ChatMessage], assistant: &ChatMessage, reasoning: String) {
+    pub fn store_turn_reasoning(
+        &self,
+        _prior: &[ChatMessage],
+        assistant: &ChatMessage,
+        reasoning: String,
+    ) {
         if !reasoning.is_empty() {
             // Store under content-only key so lookups work even when Codex
             // replays the assistant text and function_calls as separate items.
@@ -72,7 +77,11 @@ impl SessionStore {
     }
 
     /// Look up reasoning_content for an assistant turn by its text content.
-    pub fn get_turn_reasoning(&self, _prior: &[ChatMessage], assistant: &ChatMessage) -> Option<String> {
+    pub fn get_turn_reasoning(
+        &self,
+        _prior: &[ChatMessage],
+        assistant: &ChatMessage,
+    ) -> Option<String> {
         let content = assistant.text_content();
         if content.is_empty() {
             return None;

@@ -30,8 +30,7 @@ fn fixture(name: &str) -> ResponsesRequest {
     p.push("tests/fixtures/codex_0_128_0");
     p.push(name);
     let bytes = std::fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
-    serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
 }
 
 #[test]
@@ -78,11 +77,7 @@ fn reasoning_input_items_are_dropped() {
     let roles: Vec<&str> = chat.messages.iter().map(|m| m.role.as_str()).collect();
     assert_eq!(roles, ["system", "user", "user"]);
 
-    let texts: Vec<&str> = chat
-        .messages
-        .iter()
-        .map(|m| m.text_content())
-        .collect();
+    let texts: Vec<&str> = chat.messages.iter().map(|m| m.text_content()).collect();
     assert_eq!(texts, ["system", "first turn", "second turn"]);
 }
 
