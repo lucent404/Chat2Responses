@@ -27,6 +27,8 @@ const defaultSettings: AppSettings = {
   upstream_timeout_seconds: 0,
   log_error_max_chars: 500
 };
+const primaryNavItems = navItems.filter((item) => item.id !== "tutorial");
+const secondaryNavItems = navItems.filter((item) => item.id === "tutorial");
 
 export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
   const { section } = useParams();
@@ -172,29 +174,21 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
             <LogOut size={18} />
           </Button>
         </div>
-        <div className="flex items-center gap-2 rounded-2xl border border-slate-300/60 bg-white/70 px-3 py-2 font-mono text-xs text-slate-600 shadow-sm">
-          <Command size={14} />
-          <span>relay://127.0.0.1</span>
-        </div>
+
         <nav className="grid gap-1.5 max-[1100px]:flex max-[1100px]:overflow-x-auto">
-          {navItems.map((item) => (
+          {primaryNavItems.map((item) => (
             <NavButton key={item.id} to={item.path} icon={item.icon} label={item.label} />
           ))}
         </nav>
-        <div className="mt-auto grid gap-3 rounded-2xl border border-slate-300/60 bg-white/72 p-3 text-xs text-muted-foreground shadow-sm backdrop-blur-xl max-[1100px]:hidden">
-          <div className="flex items-center justify-between">
-            <span className="font-semibold text-foreground">Console session</span>
-            <span className="relative flex h-2.5 w-2.5">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
-              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
-            </span>
-          </div>
-          <span className="font-mono">Local relay admin for `127.0.0.1`</span>
+        <div className="mt-auto grid gap-1.5 border-t border-white/60 pt-3 max-[1100px]:mt-0 max-[1100px]:flex max-[1100px]:overflow-x-auto max-[1100px]:border-t-0 max-[1100px]:pt-0">
+          {secondaryNavItems.map((item) => (
+            <NavButton key={item.id} to={item.path} icon={item.icon} label={item.label} />
+          ))}
+          <Button variant="ghost" className="justify-start text-slate-600 hover:bg-white/75 hover:text-slate-950 max-[1100px]:hidden" onClick={logout}>
+            <LogOut size={18} />
+            退出登录
+          </Button>
         </div>
-        <Button variant="ghost" className="justify-start max-[1100px]:hidden" onClick={logout}>
-          <LogOut size={18} />
-          退出登录
-        </Button>
       </aside>
       <section className="min-h-0 min-w-0 overflow-y-auto py-1 pr-1 max-[1100px]:p-0">
         <PanelHeader tab={tab} refresh={refresh} refreshing={refreshing} setToast={setToast} />

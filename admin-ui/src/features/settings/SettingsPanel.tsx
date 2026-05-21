@@ -70,7 +70,6 @@ export function SettingsPanel({ settings, refresh, saveSettings, setToast }: Set
           <CardHeader>
             <div>
               <CardTitle>日志策略</CardTitle>
-              <p className="mt-1 text-sm text-muted-foreground">控制是否把代理请求写入本地 request_logs 表。</p>
             </div>
             <Badge variant={requestLoggingEnabled ? "success" : "warning"}>{requestLoggingEnabled ? "recording" : "paused"}</Badge>
           </CardHeader>
@@ -91,7 +90,6 @@ export function SettingsPanel({ settings, refresh, saveSettings, setToast }: Set
           <CardHeader>
             <div>
               <CardTitle>渠道转发</CardTitle>
-              <p className="mt-1 text-sm text-muted-foreground">这些设置只影响后续新请求，正在进行的请求不会被中断。</p>
             </div>
             <ShieldAlert size={20} className="text-blue-600" />
           </CardHeader>
@@ -108,7 +106,7 @@ export function SettingsPanel({ settings, refresh, saveSettings, setToast }: Set
         </Card>
 
         <div className="glass-panel-strong flex items-center justify-between gap-3 rounded-3xl p-3 max-[640px]:grid">
-          <TextMuted>设置保存在本地 SQLite，不需要重启服务。</TextMuted>
+          <TextMuted>操作</TextMuted>
           <div className="flex gap-2 max-[640px]:grid max-[640px]:grid-cols-2">
             <Button type="button" variant="secondary" onClick={refresh} disabled={busy}>
               重新加载

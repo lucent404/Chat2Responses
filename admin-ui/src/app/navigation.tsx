@@ -18,12 +18,12 @@ export function tabTitle(tab: Tab) {
 
 export function tabSubtitle(tab: Tab) {
   return {
-    overview: "查看代理配置完整度、调用健康度和最近流量",
-    upstreams: "保存渠道地址和渠道 key",
-    models: "把对外模型名映射到一个或多个渠道真实模型；未映射时渠道模型会直接对外提供",
-    keys: "调用方使用这里生成的新 key 访问代理",
-    logs: "查看请求、状态和 token usage",
-    settings: "控制日志记录、渠道超时和错误记录长度",
-    tutorial: "生成 Codex 模型 metadata catalog，并查看本地配置步骤"
+    overview: "",
+    upstreams: "",
+    models: "",
+    keys: "",
+    logs: "",
+    settings: "",
+    tutorial: ""
   }[tab];
 }

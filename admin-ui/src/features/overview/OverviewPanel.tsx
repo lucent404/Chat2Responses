@@ -50,9 +50,8 @@ export function OverviewPanel({ upstreams, upstreamTotal, models, modelTotal, av
                   <span className="font-mono text-xs text-muted-foreground">Responses -&gt; Chat Completions</span>
                 </div>
                 <h3 className="max-w-[820px] text-4xl font-semibold leading-[1.04] tracking-normal text-foreground max-[760px]:text-3xl max-[460px]:text-2xl">
-                  Control the relay path from caller key to channel model.
+                  总览
                 </h3>
-                <TextMuted>实时汇总当前配置、模型发布和最近请求，不需要新增后端统计接口。</TextMuted>
               </div>
               <Button asChild>
                 <NavLink to="/admin/logs">
