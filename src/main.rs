@@ -910,13 +910,13 @@ fn codex_model_metadata(model: &db::AvailableModel, index: usize) -> serde_json:
             "limit": 10000,
         },
         "supports_parallel_tool_calls": model.supports_parallel_tool_calls,
-        "supports_image_detail_original": false,
+        "supports_image_detail_original": model.supports_image_input,
         "context_window": context_window,
         "max_context_window": max_context_window,
         "auto_compact_token_limit": null,
         "effective_context_window_percent": 95,
         "experimental_supported_tools": [],
-        "input_modalities": ["text"],
+        "input_modalities": if model.supports_image_input { vec!["text", "image"] } else { vec!["text"] },
         "supports_search_tool": false,
     })
 }
@@ -1557,6 +1557,7 @@ fn model_config_from_value(value: &serde_json::Value) -> Option<UpstreamModelInp
             &["supports_reasoning_summaries", "reasoning_summaries"],
         )
         .unwrap_or(false),
+        supports_image_input: model_supports_image_input(value),
     })
 }
 
@@ -1570,6 +1571,34 @@ fn json_bool(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
         .find_map(|key| value.get(*key).and_then(|item| item.as_bool()))
 }
 
+fn model_supports_image_input(value: &serde_json::Value) -> bool {
+    json_modalities_include_image(value, &["input_modalities", "modalities"]).unwrap_or_else(|| {
+        json_bool(
+            value,
+            &[
+                "supports_image_input",
+                "supports_images",
+                "supports_vision",
+                "vision",
+            ],
+        )
+        .unwrap_or(false)
+    })
+}
+
+fn json_modalities_include_image(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|item| {
+            item.as_array().map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .any(|item| item.eq_ignore_ascii_case("image"))
+            })
+        })
+    })
+}
+
 fn merge_model_configs(base: &mut [UpstreamModelInput], overrides: &[UpstreamModelInput]) {
     for item in base {
         if let Some(override_item) = overrides
@@ -1581,6 +1610,7 @@ fn merge_model_configs(base: &mut [UpstreamModelInput], overrides: &[UpstreamMod
             item.max_context_window = override_item.max_context_window.max(1);
             item.supports_parallel_tool_calls = override_item.supports_parallel_tool_calls;
             item.supports_reasoning_summaries = override_item.supports_reasoning_summaries;
+            item.supports_image_input = override_item.supports_image_input;
         }
     }
 }
@@ -1653,6 +1683,32 @@ mod tests {
         let models = serde_json::json!({"models":[{"id":"b"}]});
         assert_eq!(model_list_from_body(&data)[0]["id"], "a");
         assert_eq!(model_list_from_body(&models)[0]["id"], "b");
+    }
+
+    #[test]
+    fn test_model_config_detects_image_modalities() {
+        let model = model_config_from_value(&serde_json::json!({
+            "id": "vision",
+            "input_modalities": ["text", "image"]
+        }))
+        .unwrap();
+        assert!(model.supports_image_input);
+    }
+
+    #[test]
+    fn test_model_config_detects_vision_bool() {
+        let model = model_config_from_value(&serde_json::json!({
+            "id": "vision",
+            "supports_vision": true
+        }))
+        .unwrap();
+        assert!(model.supports_image_input);
+    }
+
+    #[test]
+    fn test_model_config_defaults_image_input_to_false() {
+        let model = model_config_from_value(&serde_json::json!({"id": "text"})).unwrap();
+        assert!(!model.supports_image_input);
     }
 
     #[test]

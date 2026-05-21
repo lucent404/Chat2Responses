@@ -47,6 +47,7 @@ pub struct UpstreamModel {
     pub max_context_window: i64,
     pub supports_parallel_tool_calls: bool,
     pub supports_reasoning_summaries: bool,
+    pub supports_image_input: bool,
     pub last_seen_at: String,
     pub created_at: String,
     pub updated_at: String,
@@ -65,6 +66,8 @@ pub struct UpstreamModelInput {
     pub supports_parallel_tool_calls: bool,
     #[serde(default)]
     pub supports_reasoning_summaries: bool,
+    #[serde(default)]
+    pub supports_image_input: bool,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -78,6 +81,7 @@ pub struct ModelRoute {
     pub max_context_window: i64,
     pub supports_parallel_tool_calls: bool,
     pub supports_reasoning_summaries: bool,
+    pub supports_image_input: bool,
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -106,6 +110,7 @@ pub struct AvailableModel {
     pub max_context_window: i64,
     pub supports_parallel_tool_calls: bool,
     pub supports_reasoning_summaries: bool,
+    pub supports_image_input: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -202,6 +207,8 @@ pub struct ModelRouteInput {
     pub supports_parallel_tool_calls: bool,
     #[serde(default)]
     pub supports_reasoning_summaries: bool,
+    #[serde(default)]
+    pub supports_image_input: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -267,6 +274,7 @@ fn normalize_model_inputs(models: &[UpstreamModelInput]) -> Vec<UpstreamModelInp
             max_context_window: item.max_context_window.max(1),
             supports_parallel_tool_calls: item.supports_parallel_tool_calls,
             supports_reasoning_summaries: item.supports_reasoning_summaries,
+            supports_image_input: item.supports_image_input,
         });
     }
     normalized
@@ -331,6 +339,7 @@ impl Db {
                 max_context_window INTEGER NOT NULL DEFAULT 128000,
                 supports_parallel_tool_calls INTEGER NOT NULL DEFAULT 1,
                 supports_reasoning_summaries INTEGER NOT NULL DEFAULT 0,
+                supports_image_input INTEGER NOT NULL DEFAULT 0,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -347,6 +356,7 @@ impl Db {
                 max_context_window INTEGER NOT NULL DEFAULT 128000,
                 supports_parallel_tool_calls INTEGER NOT NULL DEFAULT 1,
                 supports_reasoning_summaries INTEGER NOT NULL DEFAULT 0,
+                supports_image_input INTEGER NOT NULL DEFAULT 0,
                 last_seen_at TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -405,6 +415,7 @@ impl Db {
         }
         self.ensure_api_key_encrypted_column().await?;
         self.ensure_upstream_model_metadata_columns().await?;
+        self.ensure_model_route_metadata_columns().await?;
         self.ensure_model_routes_without_unique_public_model()
             .await?;
         Ok(())
@@ -430,6 +441,7 @@ impl Db {
             ("max_context_window", "INTEGER NOT NULL DEFAULT 128000"),
             ("supports_parallel_tool_calls", "INTEGER NOT NULL DEFAULT 1"),
             ("supports_reasoning_summaries", "INTEGER NOT NULL DEFAULT 0"),
+            ("supports_image_input", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             let exists: Option<i64> = sqlx::query_scalar(
                 "SELECT 1 FROM pragma_table_info('upstream_models') WHERE name = ?",
@@ -440,6 +452,31 @@ impl Db {
             if exists.is_none() {
                 sqlx::query(&format!(
                     "ALTER TABLE upstream_models ADD COLUMN {name} {definition}"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_model_route_metadata_columns(&self) -> Result<()> {
+        for (name, definition) in [
+            ("context_window", "INTEGER NOT NULL DEFAULT 128000"),
+            ("max_context_window", "INTEGER NOT NULL DEFAULT 128000"),
+            ("supports_parallel_tool_calls", "INTEGER NOT NULL DEFAULT 1"),
+            ("supports_reasoning_summaries", "INTEGER NOT NULL DEFAULT 0"),
+            ("supports_image_input", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            let exists: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM pragma_table_info('model_routes') WHERE name = ?",
+            )
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?;
+            if exists.is_none() {
+                sqlx::query(&format!(
+                    "ALTER TABLE model_routes ADD COLUMN {name} {definition}"
                 ))
                 .execute(&self.pool)
                 .await?;
@@ -475,6 +512,7 @@ impl Db {
                 max_context_window INTEGER NOT NULL DEFAULT 128000,
                 supports_parallel_tool_calls INTEGER NOT NULL DEFAULT 1,
                 supports_reasoning_summaries INTEGER NOT NULL DEFAULT 0,
+                supports_image_input INTEGER NOT NULL DEFAULT 0,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -488,9 +526,9 @@ impl Db {
             r#"
             INSERT INTO model_routes_new
             (id, public_model, upstream_id, upstream_model, context_window, max_context_window,
-             supports_parallel_tool_calls, supports_reasoning_summaries, enabled, created_at, updated_at)
+             supports_parallel_tool_calls, supports_reasoning_summaries, supports_image_input, enabled, created_at, updated_at)
             SELECT id, public_model, upstream_id, upstream_model, context_window, max_context_window,
-                   supports_parallel_tool_calls, supports_reasoning_summaries, enabled, created_at, updated_at
+                   supports_parallel_tool_calls, supports_reasoning_summaries, 0, enabled, created_at, updated_at
             FROM model_routes
             "#,
         )
@@ -777,14 +815,16 @@ impl Db {
                 r#"
                 INSERT INTO upstream_models
                 (upstream_id, model, enabled, context_window, max_context_window,
-                 supports_parallel_tool_calls, supports_reasoning_summaries, last_seen_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 supports_parallel_tool_calls, supports_reasoning_summaries, supports_image_input,
+                 last_seen_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(upstream_id, model) DO UPDATE SET
                     enabled = excluded.enabled,
                     context_window = excluded.context_window,
                     max_context_window = excluded.max_context_window,
                     supports_parallel_tool_calls = excluded.supports_parallel_tool_calls,
                     supports_reasoning_summaries = excluded.supports_reasoning_summaries,
+                    supports_image_input = excluded.supports_image_input,
                     last_seen_at = excluded.last_seen_at,
                     updated_at = excluded.updated_at
                 "#,
@@ -796,6 +836,7 @@ impl Db {
             .bind(item.max_context_window)
             .bind(item.supports_parallel_tool_calls)
             .bind(item.supports_reasoning_summaries)
+            .bind(item.supports_image_input)
             .bind(&ts)
             .bind(&ts)
             .bind(&ts)
@@ -833,13 +874,15 @@ impl Db {
                 r#"
                 INSERT INTO upstream_models
                 (upstream_id, model, enabled, context_window, max_context_window,
-                 supports_parallel_tool_calls, supports_reasoning_summaries, last_seen_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 supports_parallel_tool_calls, supports_reasoning_summaries, supports_image_input,
+                 last_seen_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(upstream_id, model) DO UPDATE SET
                     context_window = excluded.context_window,
                     max_context_window = excluded.max_context_window,
                     supports_parallel_tool_calls = excluded.supports_parallel_tool_calls,
                     supports_reasoning_summaries = excluded.supports_reasoning_summaries,
+                    supports_image_input = excluded.supports_image_input,
                     last_seen_at = excluded.last_seen_at,
                     updated_at = excluded.updated_at
                 "#,
@@ -851,6 +894,7 @@ impl Db {
             .bind(item.max_context_window)
             .bind(item.supports_parallel_tool_calls)
             .bind(item.supports_reasoning_summaries)
+            .bind(item.supports_image_input)
             .bind(&ts)
             .bind(&ts)
             .bind(&ts)
@@ -904,6 +948,7 @@ impl Db {
                    m.context_window, m.max_context_window,
                    m.supports_parallel_tool_calls != 0 AS supports_parallel_tool_calls,
                    m.supports_reasoning_summaries != 0 AS supports_reasoning_summaries,
+                   m.supports_image_input != 0 AS supports_image_input,
                    m.last_seen_at, m.created_at, m.updated_at
             FROM upstream_models m
             JOIN upstreams u ON u.id = m.upstream_id
@@ -927,14 +972,16 @@ impl Db {
                 r#"
                 INSERT INTO upstream_models
                 (upstream_id, model, enabled, context_window, max_context_window,
-                 supports_parallel_tool_calls, supports_reasoning_summaries, last_seen_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 supports_parallel_tool_calls, supports_reasoning_summaries, supports_image_input,
+                 last_seen_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(upstream_id, model) DO UPDATE SET
                     enabled = excluded.enabled,
                     context_window = excluded.context_window,
                     max_context_window = excluded.max_context_window,
                     supports_parallel_tool_calls = excluded.supports_parallel_tool_calls,
                     supports_reasoning_summaries = excluded.supports_reasoning_summaries,
+                    supports_image_input = excluded.supports_image_input,
                     updated_at = excluded.updated_at
                 "#,
             )
@@ -945,6 +992,7 @@ impl Db {
             .bind(item.max_context_window)
             .bind(item.supports_parallel_tool_calls)
             .bind(item.supports_reasoning_summaries)
+            .bind(item.supports_image_input)
             .bind(&ts)
             .bind(&ts)
             .bind(&ts)
@@ -979,6 +1027,7 @@ impl Db {
                    m.context_window, m.max_context_window,
                    m.supports_parallel_tool_calls != 0 AS supports_parallel_tool_calls,
                    m.supports_reasoning_summaries != 0 AS supports_reasoning_summaries,
+                   m.supports_image_input != 0 AS supports_image_input,
                    m.enabled != 0 AS enabled, m.created_at, m.updated_at
             FROM model_routes m
             JOIN upstreams u ON u.id = m.upstream_id
@@ -1031,12 +1080,21 @@ impl Db {
                 .map(|model| model.supports_reasoning_summaries)
                 .unwrap_or(false)
         };
+        let supports_image_input = if input.supports_image_input {
+            true
+        } else {
+            inherited
+                .as_ref()
+                .map(|model| model.supports_image_input)
+                .unwrap_or(false)
+        };
         let id = sqlx::query(
             r#"
             INSERT INTO model_routes
             (public_model, upstream_id, upstream_model, context_window, max_context_window,
-             supports_parallel_tool_calls, supports_reasoning_summaries, enabled, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             supports_parallel_tool_calls, supports_reasoning_summaries, supports_image_input,
+             enabled, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(input.public_model.trim())
@@ -1046,6 +1104,7 @@ impl Db {
         .bind(max_context_window)
         .bind(supports_parallel_tool_calls)
         .bind(supports_reasoning_summaries)
+        .bind(supports_image_input)
         .bind(input.enabled)
         .bind(&ts)
         .bind(&ts)
@@ -1069,6 +1128,7 @@ impl Db {
                    m.context_window, m.max_context_window,
                    m.supports_parallel_tool_calls != 0 AS supports_parallel_tool_calls,
                    m.supports_reasoning_summaries != 0 AS supports_reasoning_summaries,
+                   m.supports_image_input != 0 AS supports_image_input,
                    m.last_seen_at, m.created_at, m.updated_at
             FROM upstream_models m
             JOIN upstreams u ON u.id = m.upstream_id
@@ -1088,6 +1148,7 @@ impl Db {
                    m.context_window, m.max_context_window,
                    m.supports_parallel_tool_calls != 0 AS supports_parallel_tool_calls,
                    m.supports_reasoning_summaries != 0 AS supports_reasoning_summaries,
+                   m.supports_image_input != 0 AS supports_image_input,
                    m.enabled != 0 AS enabled, m.created_at, m.updated_at
             FROM model_routes m JOIN upstreams u ON u.id = m.upstream_id
             WHERE m.id = ?
@@ -1108,7 +1169,8 @@ impl Db {
             UPDATE model_routes
             SET public_model = ?, upstream_id = ?, upstream_model = ?, context_window = ?,
                 max_context_window = ?, supports_parallel_tool_calls = ?,
-                supports_reasoning_summaries = ?, enabled = ?, updated_at = ?
+                supports_reasoning_summaries = ?, supports_image_input = ?,
+                enabled = ?, updated_at = ?
             WHERE id = ?
             "#,
         )
@@ -1119,6 +1181,7 @@ impl Db {
         .bind(input.max_context_window)
         .bind(input.supports_parallel_tool_calls)
         .bind(input.supports_reasoning_summaries)
+        .bind(input.supports_image_input)
         .bind(input.enabled)
         .bind(now())
         .bind(id)
@@ -1300,7 +1363,8 @@ impl Db {
                        MAX(m.context_window) AS context_window,
                        MAX(m.max_context_window) AS max_context_window,
                        MAX(CASE WHEN m.supports_parallel_tool_calls THEN 1 ELSE 0 END) AS supports_parallel_tool_calls,
-                       MAX(CASE WHEN m.supports_reasoning_summaries THEN 1 ELSE 0 END) AS supports_reasoning_summaries
+                       MAX(CASE WHEN m.supports_reasoning_summaries THEN 1 ELSE 0 END) AS supports_reasoning_summaries,
+                       MAX(CASE WHEN m.supports_image_input THEN 1 ELSE 0 END) AS supports_image_input
                 FROM upstream_models m JOIN upstreams u ON u.id = m.upstream_id
                 WHERE m.enabled = 1 AND u.enabled = 1
                 GROUP BY m.model, u.name
@@ -1316,7 +1380,8 @@ impl Db {
                        MAX(m.context_window) AS context_window,
                        MAX(m.max_context_window) AS max_context_window,
                        MAX(CASE WHEN m.supports_parallel_tool_calls THEN 1 ELSE 0 END) AS supports_parallel_tool_calls,
-                       MAX(CASE WHEN m.supports_reasoning_summaries THEN 1 ELSE 0 END) AS supports_reasoning_summaries
+                       MAX(CASE WHEN m.supports_reasoning_summaries THEN 1 ELSE 0 END) AS supports_reasoning_summaries,
+                       MAX(CASE WHEN m.supports_image_input THEN 1 ELSE 0 END) AS supports_image_input
                 FROM model_routes m
                 JOIN upstreams u ON u.id = m.upstream_id
                 JOIN upstream_models um ON um.upstream_id = m.upstream_id AND um.model = m.upstream_model
@@ -1342,6 +1407,7 @@ impl Db {
                     existing.max_context_window.max(row.max_context_window);
                 existing.supports_parallel_tool_calls |= row.supports_parallel_tool_calls;
                 existing.supports_reasoning_summaries |= row.supports_reasoning_summaries;
+                existing.supports_image_input |= row.supports_image_input;
                 if !existing.source.contains(&row.source) {
                     existing.source = format!("{},{}", existing.source, row.source);
                 }
@@ -1525,6 +1591,7 @@ mod tests {
             max_context_window: 128_000,
             supports_parallel_tool_calls: true,
             supports_reasoning_summaries: false,
+            supports_image_input: false,
             enabled: true,
         })
         .await
@@ -1538,6 +1605,7 @@ mod tests {
                 max_context_window: 128_000,
                 supports_parallel_tool_calls: true,
                 supports_reasoning_summaries: false,
+                supports_image_input: false,
             }],
             None,
         )
@@ -1580,6 +1648,7 @@ mod tests {
                 max_context_window: 128_000,
                 supports_parallel_tool_calls: true,
                 supports_reasoning_summaries: false,
+                supports_image_input: false,
             }],
             None,
         )
@@ -1594,6 +1663,7 @@ mod tests {
                 max_context_window: 96_000,
                 supports_parallel_tool_calls: false,
                 supports_reasoning_summaries: true,
+                supports_image_input: true,
             }],
         )
         .await
@@ -1607,6 +1677,7 @@ mod tests {
                 max_context_window: 48_000,
                 supports_parallel_tool_calls: true,
                 supports_reasoning_summaries: false,
+                supports_image_input: false,
             }],
         )
         .await
@@ -1622,6 +1693,7 @@ mod tests {
         assert_eq!(model.max_context_window, 48_000);
         assert!(model.supports_parallel_tool_calls);
         assert!(!model.supports_reasoning_summaries);
+        assert!(!model.supports_image_input);
     }
 
     #[tokio::test]
@@ -1650,6 +1722,7 @@ mod tests {
                 max_context_window: 96_000,
                 supports_parallel_tool_calls: false,
                 supports_reasoning_summaries: true,
+                supports_image_input: true,
             }],
             None,
         )
@@ -1665,6 +1738,7 @@ mod tests {
                 max_context_window: 128_000,
                 supports_parallel_tool_calls: true,
                 supports_reasoning_summaries: false,
+                supports_image_input: false,
                 enabled: true,
             })
             .await
@@ -1674,6 +1748,7 @@ mod tests {
         assert_eq!(route.max_context_window, 96_000);
         assert!(!route.supports_parallel_tool_calls);
         assert!(route.supports_reasoning_summaries);
+        assert!(route.supports_image_input);
     }
 
     #[tokio::test]

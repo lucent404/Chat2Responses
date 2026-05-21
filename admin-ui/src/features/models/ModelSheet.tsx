@@ -28,6 +28,7 @@ export function ModelSheet({ open, onOpenChange, route, upstreams, refresh, setT
   const [maxContextWindow, setMaxContextWindow] = useState(128000);
   const [supportsParallelTools, setSupportsParallelTools] = useState(true);
   const [supportsReasoning, setSupportsReasoning] = useState(false);
+  const [supportsImageInput, setSupportsImageInput] = useState(false);
   const [enabled, setEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
   const editing = Boolean(route);
@@ -44,6 +45,7 @@ export function ModelSheet({ open, onOpenChange, route, upstreams, refresh, setT
     setMaxContextWindow(route?.max_context_window || 128000);
     setSupportsParallelTools(route?.supports_parallel_tool_calls ?? true);
     setSupportsReasoning(route?.supports_reasoning_summaries ?? false);
+    setSupportsImageInput(route?.supports_image_input ?? false);
     setEnabled(route?.enabled ?? true);
   }, [open, route]);
 
@@ -68,6 +70,7 @@ export function ModelSheet({ open, onOpenChange, route, upstreams, refresh, setT
             setMaxContextWindow(first.max_context_window);
             setSupportsParallelTools(first.supports_parallel_tool_calls);
             setSupportsReasoning(first.supports_reasoning_summaries);
+            setSupportsImageInput(first.supports_image_input);
           }
         }
       })
@@ -91,6 +94,7 @@ export function ModelSheet({ open, onOpenChange, route, upstreams, refresh, setT
         max_context_window: maxContextWindow,
         supports_parallel_tool_calls: supportsParallelTools,
         supports_reasoning_summaries: supportsReasoning,
+        supports_image_input: supportsImageInput,
         enabled
       };
       if (route) {
@@ -105,6 +109,7 @@ export function ModelSheet({ open, onOpenChange, route, upstreams, refresh, setT
       setMaxContextWindow(128000);
       setSupportsParallelTools(true);
       setSupportsReasoning(false);
+      setSupportsImageInput(false);
       setEnabled(true);
       onOpenChange(false);
       await refresh();
@@ -153,6 +158,7 @@ export function ModelSheet({ open, onOpenChange, route, upstreams, refresh, setT
                     setMaxContextWindow(selected.max_context_window);
                     setSupportsParallelTools(selected.supports_parallel_tool_calls);
                     setSupportsReasoning(selected.supports_reasoning_summaries);
+                    setSupportsImageInput(selected.supports_image_input);
                   }
                   if (!publicModel) setPublicModel(value);
                 }}
@@ -183,6 +189,7 @@ export function ModelSheet({ open, onOpenChange, route, upstreams, refresh, setT
             </Field>
             <SwitchField label="Parallel tool calls" description="渠道真实模型支持并行工具调用时打开。" checked={supportsParallelTools} onCheckedChange={setSupportsParallelTools} />
             <SwitchField label="Reasoning summaries" description="渠道支持 reasoning summary 时打开。" checked={supportsReasoning} onCheckedChange={setSupportsReasoning} />
+            <SwitchField label="Image input" description="渠道真实模型支持图片输入时打开；导出的 Codex catalog 会据此声明 image modality。" checked={supportsImageInput} onCheckedChange={setSupportsImageInput} />
             <SwitchField label="启用映射" description="停用后这个映射候选不再参与随机路由。" checked={enabled} onCheckedChange={setEnabled} />
             <Button disabled={busy || !selectedUpstreamId || !selectedUpstreamModel}>{busy ? "保存中" : editing ? "保存修改" : "保存映射"}</Button>
           </Form>

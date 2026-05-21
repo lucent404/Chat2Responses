@@ -150,6 +150,7 @@ async fn seed_test_route(db: &Db, crypto: &Crypto, upstream_base: &str, client_k
             max_context_window: 128_000,
             supports_parallel_tool_calls: true,
             supports_reasoning_summaries: true,
+            supports_image_input: false,
         }],
         None,
     )

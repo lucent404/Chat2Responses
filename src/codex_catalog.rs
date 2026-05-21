@@ -85,6 +85,11 @@ fn model_metadata_from_template(template: &Value, model: &AvailableModel, index:
     let mut generated = template.clone();
     let context_window = model.context_window.max(1);
     let max_context_window = model.max_context_window.max(context_window);
+    let input_modalities = if model.supports_image_input {
+        vec!["text", "image"]
+    } else {
+        vec!["text"]
+    };
     merge_object_fields(
         &mut generated,
         json!({
@@ -102,8 +107,8 @@ fn model_metadata_from_template(template: &Value, model: &AvailableModel, index:
             "auto_compact_token_limit": null,
             "effective_context_window_percent": 95,
             "supports_parallel_tool_calls": model.supports_parallel_tool_calls,
-            "input_modalities": ["text"],
-            "supports_image_detail_original": false,
+            "input_modalities": input_modalities,
+            "supports_image_detail_original": model.supports_image_input,
             "supports_search_tool": false,
             "web_search_tool_type": "text",
             "priority": 100 + index as i64,
@@ -142,6 +147,7 @@ mod tests {
             max_context_window,
             supports_parallel_tool_calls: true,
             supports_reasoning_summaries: false,
+            supports_image_input: false,
         }
     }
 
@@ -191,6 +197,21 @@ mod tests {
         assert_eq!(qwen["max_context_window"], 128_000);
         assert!(qwen["auto_compact_token_limit"].is_null());
         assert_eq!(qwen["base_instructions"], "template instructions");
+    }
+
+    #[test]
+    fn image_models_include_image_modality() {
+        let mut qwen = model("Qwen-VL", 128_000, 128_000);
+        qwen.supports_image_input = true;
+        let output = generate_catalog_json_from_str(source_catalog(), &[qwen]).expect("catalog");
+        let parsed: Value = serde_json::from_str(&output).expect("json");
+        let models = parsed["models"].as_array().expect("models");
+        let qwen = models
+            .iter()
+            .find(|item| item["slug"] == "Qwen-VL")
+            .expect("qwen model");
+        assert_eq!(qwen["input_modalities"], json!(["text", "image"]));
+        assert_eq!(qwen["supports_image_detail_original"], true);
     }
 
     #[test]

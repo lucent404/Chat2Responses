@@ -95,6 +95,7 @@ export function createModelRoute(input: {
   max_context_window: number;
   supports_parallel_tool_calls: boolean;
   supports_reasoning_summaries: boolean;
+  supports_image_input: boolean;
   enabled: boolean;
 }) {
   return request("/admin/api/models", {
@@ -113,6 +114,7 @@ export function updateModelRoute(
     max_context_window: number;
     supports_parallel_tool_calls: boolean;
     supports_reasoning_summaries: boolean;
+    supports_image_input: boolean;
     enabled: boolean;
   }
 ) {

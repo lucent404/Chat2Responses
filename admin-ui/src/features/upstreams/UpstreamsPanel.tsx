@@ -158,6 +158,7 @@ export function UpstreamsPanel({ rows, pageState, setPageState, refresh, setToas
                   <span>max: {model.max_context_window}</span>
                   <span>tools: {model.supports_parallel_tool_calls ? "yes" : "no"}</span>
                   <span>reasoning: {model.supports_reasoning_summaries ? "yes" : "no"}</span>
+                  <span>image: {model.supports_image_input ? "yes" : "no"}</span>
                 </div>
               </div>
             )) : <div className="rounded-2xl border border-dashed border-slate-300/70 p-6 text-center text-sm text-muted-foreground">当前没有已启用模型，请在编辑渠道里启用模型。</div>}

@@ -49,6 +49,7 @@ export type UpstreamModel = {
   max_context_window: number;
   supports_parallel_tool_calls: boolean;
   supports_reasoning_summaries: boolean;
+  supports_image_input: boolean;
   last_seen_at?: string;
   created_at?: string;
   updated_at?: string;
@@ -64,6 +65,7 @@ export type ModelRoute = {
   max_context_window: number;
   supports_parallel_tool_calls: boolean;
   supports_reasoning_summaries: boolean;
+  supports_image_input: boolean;
   enabled: boolean;
 };
 
@@ -91,6 +93,7 @@ export type AvailableModel = {
   max_context_window: number;
   supports_parallel_tool_calls: boolean;
   supports_reasoning_summaries: boolean;
+  supports_image_input: boolean;
 };
 
 export type CodexCatalogStatus = {

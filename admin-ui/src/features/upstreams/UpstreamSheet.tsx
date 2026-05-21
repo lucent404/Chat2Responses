@@ -206,6 +206,10 @@ function UpstreamModelEditor({
                     <input type="checkbox" checked={model.supports_reasoning_summaries} onChange={(event) => update(model.model, { supports_reasoning_summaries: event.target.checked })} />
                     Reasoning summaries
                   </label>
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input type="checkbox" checked={model.supports_image_input} onChange={(event) => update(model.model, { supports_image_input: event.target.checked })} />
+                    Image input
+                  </label>
                 </div>
               ) : null}
             </div>

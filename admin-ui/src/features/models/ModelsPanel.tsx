@@ -40,7 +40,7 @@ export function ModelsPanel({ rows, pageState, setPageState, upstreams, refresh,
     { key: "public", header: "映射模型", cell: (row) => <TextStrong>{row.public_model}</TextStrong> },
     { key: "upstream", header: "渠道", cell: (row) => row.upstream_name },
     { key: "real", header: "真实模型", cell: (row) => <TextMono>{row.upstream_model}</TextMono> },
-    { key: "cap", header: "能力", cell: (row) => <Badge variant="outline">{row.supports_reasoning_summaries ? "tools, reasoning" : "tools"}</Badge> },
+    { key: "cap", header: "能力", cell: (row) => <Badge variant="outline">{modelCapabilities(row)}</Badge> },
     { key: "status", header: "映射状态", cell: (row) => <StatusBadge enabled={row.enabled} /> },
     {
       key: "actions",
@@ -122,4 +122,11 @@ export function ModelsPanel({ rows, pageState, setPageState, upstreams, refresh,
       />
     </PanelStack>
   );
+}
+
+function modelCapabilities(row: ModelRoute) {
+  const capabilities = ["tools"];
+  if (row.supports_reasoning_summaries) capabilities.push("reasoning");
+  if (row.supports_image_input) capabilities.push("image");
+  return capabilities.join(", ");
 }
