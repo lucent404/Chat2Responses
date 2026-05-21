@@ -1,0 +1,15 @@
+.DS_Store
+.git
+.idea
+.codex
+target
+data
+admin-ui/dist
+!admin-ui/dist/
+!admin-ui/dist/**
+admin-ui/node_modules
+node_modules
+__pycache__
+*.pyc
+*.egg-info
+.venv

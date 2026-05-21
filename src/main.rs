@@ -33,6 +33,9 @@ use types::*;
 #[derive(Parser, Debug)]
 #[command(name = "chat2responses", about = "Responses API service proxy")]
 struct Args {
+    #[arg(long, env = "CHAT2RESPONSES_HOST", default_value = "127.0.0.1")]
+    host: String,
+
     #[arg(long, env = "CHAT2RESPONSES_PORT", default_value = "4444")]
     port: u16,
 
@@ -182,7 +185,7 @@ async fn main() -> Result<()> {
     };
 
     let app = build_router(state);
-    let addr = format!("127.0.0.1:{}", args.port);
+    let addr = format!("{}:{}", args.host, args.port);
     info!("Chat2Responses service listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -241,9 +244,7 @@ fn build_router(state: AppState) -> Router {
             get(get_settings).put(update_settings),
         );
 
-    let static_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("admin-ui")
-        .join("dist");
+    let static_dir = admin_static_dir();
 
     Router::new()
         .merge(api)
@@ -259,10 +260,7 @@ fn build_router(state: AppState) -> Router {
 }
 
 async fn admin_index() -> Response {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("admin-ui")
-        .join("dist")
-        .join("index.html");
+    let path = admin_static_dir().join("index.html");
     match tokio::fs::read_to_string(path).await {
         Ok(html) => Html(html).into_response(),
         Err(_) => Html(
@@ -270,6 +268,16 @@ async fn admin_index() -> Response {
         )
         .into_response(),
     }
+}
+
+fn admin_static_dir() -> std::path::PathBuf {
+    std::env::var_os("CHAT2RESPONSES_ADMIN_UI_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("admin-ui")
+                .join("dist")
+        })
 }
 
 async fn admin_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
