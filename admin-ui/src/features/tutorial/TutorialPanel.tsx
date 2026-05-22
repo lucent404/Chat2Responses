@@ -74,7 +74,11 @@ export function TutorialPanel({ catalogStatus, refresh, setToast }: TutorialPane
       <Card className="rounded-[30px] border-slate-300/60 bg-gradient-to-br from-white via-slate-50 to-blue-50/55">
         <CardHeader>
           <div>
-            <CardTitle>放置和配置步骤</CardTitle>
+            <CardTitle className="text-red-600">
+              Codex 提示：⚠ Model metadata for `xxxx` not found. Defaulting to fallback metadata;
+              this can degrade performance and cause issues.
+            </CardTitle>
+            <CardTitle>解决方法</CardTitle>
           </div>
           <Settings2 size={20} className="text-blue-600" />
         </CardHeader>
