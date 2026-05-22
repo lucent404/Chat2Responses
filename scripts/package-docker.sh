@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_TAG="${IMAGE_TAG:-chat2responses:local}"
 SKIP_DOCKER=0
 PUSH=0
+PUSH_LATEST=1
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 BUILDER="${BUILDER:-newapi-builder}"
 DOCKERHUB_USERNAME="${DOCKERHUB_USERNAME:-}"
@@ -24,6 +25,7 @@ Options:
   --image-tag TAG   Docker image tag. Default: chat2responses:local
   --skip-docker    Prepare artifacts only; do not run docker build.
   --push           Push the image to Docker Hub after building.
+  --no-latest      With --push, do not also tag and push :latest.
   --platforms LIST  Build platforms. Default: linux/amd64,linux/arm64
                    Can also use PLATFORMS.
   --builder NAME    Docker buildx builder. Default: newapi-builder
@@ -42,6 +44,7 @@ Examples:
   scripts/package-docker.sh
   scripts/package-docker.sh --image-tag chat2responses:v0.2.0
   DOCKERHUB_USERNAME=lucentttt DOCKERHUB_TOKEN=... scripts/package-docker.sh --push --image-tag v0.2.0
+  DOCKERHUB_USERNAME=lucentttt DOCKERHUB_TOKEN=... scripts/package-docker.sh --push --image-tag v0.2.0 --no-latest
 USAGE
 }
 
@@ -65,6 +68,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --push)
       PUSH=1
+      shift
+      ;;
+    --no-latest)
+      PUSH_LATEST=0
       shift
       ;;
     --dockerhub-username)
@@ -121,6 +128,20 @@ if [[ "$PUSH" -eq 1 ]]; then
   fi
 fi
 
+LATEST_IMAGE_TAG=""
+if [[ "$PUSH" -eq 1 && "$PUSH_LATEST" -eq 1 ]]; then
+  LAST_COMPONENT="${IMAGE_TAG##*/}"
+  if [[ "$LAST_COMPONENT" == *":"* ]]; then
+    IMAGE_REPOSITORY="${IMAGE_TAG%:*}"
+  else
+    IMAGE_REPOSITORY="$IMAGE_TAG"
+  fi
+  LATEST_IMAGE_TAG="$IMAGE_REPOSITORY:latest"
+  if [[ "$LATEST_IMAGE_TAG" == "$IMAGE_TAG" ]]; then
+    LATEST_IMAGE_TAG=""
+  fi
+fi
+
 if [[ "$SKIP_DOCKER" -eq 1 ]]; then
   echo "==> Docker build skipped"
   echo "Dockerfile builds release artifacts inside target-platform builder containers."
@@ -146,12 +167,18 @@ if [[ "$PUSH" -eq 1 ]]; then
     echo "==> Using existing Docker login session"
   fi
 
-  echo "==> Building and pushing Docker image $IMAGE_TAG for $PLATFORMS"
+  TAG_ARGS=(-t "$IMAGE_TAG")
+  if [[ -n "$LATEST_IMAGE_TAG" ]]; then
+    TAG_ARGS+=(-t "$LATEST_IMAGE_TAG")
+    echo "==> Building and pushing Docker images $IMAGE_TAG and $LATEST_IMAGE_TAG for $PLATFORMS"
+  else
+    echo "==> Building and pushing Docker image $IMAGE_TAG for $PLATFORMS"
+  fi
   docker buildx build \
     --builder "$BUILDER" \
     --platform "$PLATFORMS" \
     --provenance=false \
-    -t "$IMAGE_TAG" \
+    "${TAG_ARGS[@]}" \
     --push \
     .
 else

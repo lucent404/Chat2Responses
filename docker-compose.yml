@@ -1,0 +1,12 @@
+services:
+  chat2responses:
+    image: lucentttt/chat2responses:latest
+    container_name: chat2responses
+    restart: unless-stopped
+    ports:
+      - "4444:4444"
+    environment:
+      CHAT2RESPONSES_SECRET: ${CHAT2RESPONSES_SECRET}
+      RUST_LOG: ${RUST_LOG:-chat2responses=info,tower_http=warn}
+    volumes:
+      - ./data:/app/data
