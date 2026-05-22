@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, ArrowRight, CheckCircle2, KeyRound, RadioTower, Route, Server, ShieldCheck, Sparkles, Zap } from "lucide-react";
+import { Activity, AlertTriangle, ArrowRight, CheckCircle2, KeyRound, RadioTower, Route, Server, ShieldCheck, Sparkles } from "lucide-react";
 import { NavLink } from "react-router-dom";
 import { Metric } from "../../components/common/Metric";
 import { PanelStack } from "../../components/common/PanelStack";
@@ -28,7 +28,6 @@ export function OverviewPanel({ upstreams, upstreamTotal, models, modelTotal, av
   const activeModels = availableModels.length;
   const enabledKeys = keys.filter((row) => row.enabled).length;
   const errors = logs.filter((row) => row.status_code >= 400);
-  const tokenTotal = logs.reduce((sum, row) => sum + row.total_tokens, 0);
   const avgDuration = logs.length ? Math.round(logs.reduce((sum, row) => sum + row.duration_ms, 0) / logs.length) : 0;
   const ready = activeChannels > 0 && activeModels > 0 && enabledKeys > 0;
 

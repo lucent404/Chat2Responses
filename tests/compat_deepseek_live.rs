@@ -4,8 +4,7 @@
 //!   - DeepSeek models : deepseek-v4-pro, deepseek-v4-flash
 //!   - Chat2Responses  : current crate (see Cargo.toml `version`)
 //!   - Codex CLI       : not exercised — these tests speak the Responses API
-//!                       directly to the relay, simulating any Codex 0.128.x
-//!                       client.
+//!     directly to the relay, simulating any Codex 0.128.x client.
 //!
 //! Gated on `DEEPSEEK_API_KEY` env var. Each test is marked `#[ignore]`
 //! so the default `cargo test` stays offline. To run:
@@ -558,19 +557,19 @@ async fn assert_tool_call_streaming(model: &str) {
         let ev = ev.expect("sse parse");
         let data: Value = serde_json::from_str(&ev.data).expect("data json");
         match ev.event.as_str() {
-            "response.output_item.added" => {
-                if data["item"]["type"].as_str() == Some("function_call") {
-                    saw_fc_added = true;
-                    assert_eq!(data["item"]["name"].as_str(), Some("get_weather"));
-                }
+            "response.output_item.added"
+                if data["item"]["type"].as_str() == Some("function_call") =>
+            {
+                saw_fc_added = true;
+                assert_eq!(data["item"]["name"].as_str(), Some("get_weather"));
             }
             "response.function_call_arguments.delta" => {
                 saw_fc_args = true;
             }
-            "response.output_item.done" => {
-                if data["item"]["type"].as_str() == Some("function_call") {
-                    saw_fc_done = true;
-                }
+            "response.output_item.done"
+                if data["item"]["type"].as_str() == Some("function_call") =>
+            {
+                saw_fc_done = true;
             }
             "response.completed" => {
                 completed_output = Some(data["response"]["output"].clone());

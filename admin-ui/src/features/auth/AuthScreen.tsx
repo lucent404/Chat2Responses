@@ -1,5 +1,4 @@
 import { type FormEvent, useState } from "react";
-import { LockKeyhole, ShieldCheck } from "lucide-react";
 import { initAdmin, loginAdmin } from "../../api/admin";
 import { BrandBlock } from "../../components/common/BrandBlock";
 import { Field } from "../../components/common/Field";

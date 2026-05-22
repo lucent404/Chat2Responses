@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import type React from "react";
 import { Search, ShieldAlert } from "lucide-react";
 import { Metric } from "../../components/common/Metric";

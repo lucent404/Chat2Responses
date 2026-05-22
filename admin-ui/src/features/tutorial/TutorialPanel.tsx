@@ -1,23 +1,21 @@
 import { useState } from "react";
-import { CheckCircle2, Copy, Download, FileJson2, FolderInput, RotateCcw, Settings2 } from "lucide-react";
+import { Copy, Download, Settings2 } from "lucide-react";
 import { downloadCodexCatalog } from "../../api/admin";
-import { Metric } from "../../components/common/Metric";
 import { PanelStack } from "../../components/common/PanelStack";
 import { TextMuted } from "../../components/common/Text";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
-import type { CodexCatalogStatus, ToastState } from "../../types/admin";
+import { copyText } from "../../lib/clipboard";
+import type { ToastState } from "../../types/admin";
 
 type TutorialPanelProps = {
-  catalogStatus: CodexCatalogStatus | null;
-  refresh: () => Promise<void>;
   setToast: (toast: ToastState) => void;
 };
 
 const genericConfigSnippet = 'model_catalog_json = "~/.codex/model-catalog.json"';
 
-export function TutorialPanel({ catalogStatus, refresh, setToast }: TutorialPanelProps) {
+export function TutorialPanel({ setToast }: TutorialPanelProps) {
   const [busy, setBusy] = useState(false);
 
   const download = async () => {
@@ -33,7 +31,6 @@ export function TutorialPanel({ catalogStatus, refresh, setToast }: TutorialPane
       link.remove();
       URL.revokeObjectURL(url);
       setToast({ type: "ok", message: "model-catalog.json 已生成并开始下载" });
-      await refresh();
     } catch (error) {
       setToast({ type: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -43,7 +40,7 @@ export function TutorialPanel({ catalogStatus, refresh, setToast }: TutorialPane
 
   const copySnippet = async () => {
     try {
-      await navigator.clipboard.writeText(genericConfigSnippet);
+      await copyText(genericConfigSnippet);
       setToast({ type: "ok", message: "配置片段已复制" });
     } catch {
       setToast({ type: "error", message: "复制失败，请手动复制页面中的配置片段" });

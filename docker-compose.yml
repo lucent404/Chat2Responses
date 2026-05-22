@@ -7,6 +7,7 @@ services:
       - "4444:4444"
     environment:
       CHAT2RESPONSES_SECRET: ${CHAT2RESPONSES_SECRET}
+      CHAT2RESPONSES_DATABASE_URL: ${CHAT2RESPONSES_DATABASE_URL:-sqlite:///app/data/chat2responses.db}
       RUST_LOG: ${RUST_LOG:-chat2responses=info,tower_http=warn}
     volumes:
       - ./data:/app/data

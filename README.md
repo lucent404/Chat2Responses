@@ -31,6 +31,7 @@ docker compose up -d
 ```
 
 首次部署前请编辑 `.env`，把 `CHAT2RESPONSES_SECRET` 改成足够长的随机字符串。
+默认数据会保存到当前部署目录的 `./data/chat2responses.db`。
 
 查看日志：
 
@@ -45,7 +46,7 @@ docker run -d \
   --name chat2responses \
   -p 4444:4444 \
   -e CHAT2RESPONSES_SECRET="change-this-long-random-secret" \
-  -v chat2responses-data:/app/data \
+  -v "$(pwd)/data:/app/data" \
   lucentttt/chat2responses:latest
 ```
 
@@ -60,7 +61,7 @@ docker run -d \
   --name chat2responses \
   -p 4444:4444 \
   -e CHAT2RESPONSES_SECRET="change-this-long-random-secret" \
-  -v chat2responses-data:/app/data \
+  -v "$(pwd)/data:/app/data" \
   chat2responses:local
 ```
 
@@ -185,6 +186,8 @@ MOONSHOT_API_KEY=sk-... cargo test --test compat_kimi_live -- --ignored --test-t
 scripts/release.sh --dry-run
 scripts/release.sh
 ```
+
+如果修改了 `Dockerfile` 或部署配置，需要重新构建并推送镜像；服务器拉取新版 `lucentttt/chat2responses:latest` 后才会生效。
 
 如只创建 GitHub Release、跳过 Docker 镜像：
 

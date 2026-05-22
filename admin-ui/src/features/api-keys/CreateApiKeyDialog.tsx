@@ -7,6 +7,7 @@ import { Button } from "../../components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../../components/ui/dialog";
 import { Form } from "../../components/ui/form";
 import { Input } from "../../components/ui/input";
+import { copyText } from "../../lib/clipboard";
 import type { AvailableModel, ToastState } from "../../types/admin";
 
 type CreateApiKeyDialogProps = {
@@ -64,9 +65,13 @@ export function CreateApiKeyDialog({ open, onOpenChange, newKey, setNewKey, refr
             <DialogFooter>
               <Button
                 variant="secondary"
-                onClick={() => {
-                  navigator.clipboard.writeText(newKey);
-                  setToast({ type: "ok", message: "密钥已复制" });
+                onClick={async () => {
+                  try {
+                    await copyText(newKey);
+                    setToast({ type: "ok", message: "密钥已复制" });
+                  } catch {
+                    setToast({ type: "error", message: "复制失败，请手动复制密钥" });
+                  }
                 }}
               >
                 <Copy size={16} />

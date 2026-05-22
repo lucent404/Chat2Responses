@@ -1,11 +1,3 @@
-mod codex_catalog;
-mod db;
-mod security;
-mod session;
-mod stream;
-mod translate;
-mod types;
-
 use anyhow::{bail, Result};
 use axum::{
     body::Body,
@@ -15,20 +7,24 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
+use chat2responses::{
+    codex_catalog,
+    db::{
+        self, ApiKeyInput, AppSettings, Db, LogInput, ModelRouteInput, PageParams, UpstreamInput,
+        UpstreamModelInput,
+    },
+    security::{generate_api_key, generate_session_token, hash_password, verify_password, Crypto},
+    session::SessionStore,
+    stream, translate,
+    types::*,
+};
 use chrono::{Duration, Utc};
 use clap::Parser;
-use db::{
-    ApiKeyInput, AppSettings, Db, LogInput, ModelRouteInput, PageParams, UpstreamInput,
-    UpstreamModelInput,
-};
 use reqwest::{Client, Url};
-use security::{generate_api_key, generate_session_token, hash_password, verify_password, Crypto};
 use serde::{Deserialize, Serialize};
-use session::SessionStore;
 use std::{sync::Arc, time::Duration as StdDuration, time::Instant};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{debug, error, info, warn};
-use types::*;
 
 #[derive(Parser, Debug)]
 #[command(name = "chat2responses", about = "Responses API service proxy")]
@@ -400,8 +396,8 @@ async fn create_upstream(
     if let Err(resp) = require_admin(&state, &headers).await {
         return resp;
     }
-    if let Err(resp) = validate_upstream_input(&input) {
-        return resp;
+    if let Err(message) = validate_upstream_input(&input) {
+        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message);
     }
     let mut discovered =
         match fetch_models_from_upstream(&state.client, &input.base_url, &input.api_key).await {
@@ -439,8 +435,8 @@ async fn update_upstream(
     if let Err(resp) = require_admin(&state, &headers).await {
         return resp;
     }
-    if let Err(resp) = validate_upstream_input(&input) {
-        return resp;
+    if let Err(message) = validate_upstream_input(&input) {
+        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message);
     }
     let encrypted = if input.api_key.trim().is_empty() {
         None
@@ -850,8 +846,8 @@ async fn update_settings(
         upstream_timeout_seconds: input.upstream_timeout_seconds,
         log_error_max_chars: input.log_error_max_chars,
     };
-    if let Err(resp) = validate_settings(&settings) {
-        return resp;
+    if let Err(message) = validate_settings(&settings) {
+        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message);
     }
     match state.db.save_app_settings(&settings).await {
         Ok(settings) => Json(settings).into_response(),
@@ -1104,11 +1100,7 @@ fn stream_log_callback(
     })
 }
 
-async fn handle_blocking(
-    state: AppState,
-    chat_req: types::ChatRequest,
-    target: ProxyTarget,
-) -> Response {
+async fn handle_blocking(state: AppState, chat_req: ChatRequest, target: ProxyTarget) -> Response {
     let mut builder = state
         .client
         .post(&target.upstream_url)
@@ -1319,20 +1311,12 @@ fn paginated<T>(items: Vec<T>, total: i64, params: &PageParams) -> Paginated<T> 
     }
 }
 
-fn validate_settings(settings: &AppSettings) -> std::result::Result<(), Response> {
+fn validate_settings(settings: &AppSettings) -> std::result::Result<(), &'static str> {
     if !(0..=600).contains(&settings.upstream_timeout_seconds) {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "upstream_timeout_seconds must be between 0 and 600",
-        ));
+        return Err("upstream_timeout_seconds must be between 0 and 600");
     }
     if !(100..=10_000).contains(&settings.log_error_max_chars) {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "log_error_max_chars must be between 100 and 10000",
-        ));
+        return Err("log_error_max_chars must be between 100 and 10000");
     }
     Ok(())
 }
@@ -1443,17 +1427,13 @@ fn clear_session_cookie(headers: &mut HeaderMap) {
     );
 }
 
-fn validate_upstream_input(input: &UpstreamInput) -> std::result::Result<(), Response> {
+fn validate_upstream_input(input: &UpstreamInput) -> std::result::Result<(), String> {
     if input.name.trim().is_empty() || input.base_url.trim().is_empty() {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "name and base_url are required",
-        ));
+        return Err("name and base_url are required".to_string());
     }
     validate_upstream(input.base_url.trim())
         .map(|_| ())
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", e.to_string()))
+        .map_err(|e| e.to_string())
 }
 
 fn validate_upstream(raw: &str) -> Result<Url> {

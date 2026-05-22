@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { CircleDot, Command, LogOut, RefreshCcw } from "lucide-react";
+import { CircleDot, LogOut } from "lucide-react";
 import { NavLink, Navigate, useParams } from "react-router-dom";
-import { getCodexCatalogStatus, getSettings, logoutAdmin, listApiKeys, listAvailableModels, listModelRoutes, listRequestLogs, listUpstreams, updateSettings } from "../api/admin";
+import { getSettings, logoutAdmin, listApiKeys, listAvailableModels, listModelRoutes, listRequestLogs, listUpstreams, updateSettings } from "../api/admin";
 import { BrandBlock } from "../components/common/BrandBlock";
 import { PanelHeader } from "../components/common/PanelHeader";
 import { Button } from "../components/ui/button";
@@ -12,7 +12,7 @@ import { OverviewPanel } from "../features/overview/OverviewPanel";
 import { SettingsPanel } from "../features/settings/SettingsPanel";
 import { TutorialPanel } from "../features/tutorial/TutorialPanel";
 import { UpstreamsPanel } from "../features/upstreams/UpstreamsPanel";
-import type { ApiKey, AppSettings, AvailableModel, CodexCatalogStatus, ModelRoute, PageState, RequestLog, ToastState, Upstream } from "../types/admin";
+import type { ApiKey, AppSettings, AvailableModel, ModelRoute, PageState, RequestLog, ToastState, Upstream } from "../types/admin";
 import { navItems, type Tab } from "./navigation";
 
 type AdminShellProps = {
@@ -43,7 +43,6 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
-  const [catalogStatus, setCatalogStatus] = useState<CodexCatalogStatus | null>(null);
   const [overviewTotals, setOverviewTotals] = useState({
     upstreams: 0,
     models: 0,
@@ -98,11 +97,6 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
     setSettings(nextSettings);
   };
 
-  const loadTutorial = async () => {
-    const nextStatus = await getCodexCatalogStatus();
-    setCatalogStatus(nextStatus);
-  };
-
   const loadOverview = async () => {
     const [nextUpstreams, nextModels, nextAvailableModels, nextKeys, nextLogs, nextSettings] = await Promise.all([
       listUpstreams({ page: 1, pageSize: 20, q: "" }),
@@ -137,7 +131,6 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
       if (tab === "keys") await loadKeys();
       if (tab === "logs") await loadLogs();
       if (tab === "settings") await loadSettings();
-      if (tab === "tutorial") await loadTutorial();
     } finally {
       setRefreshing(false);
     }
@@ -215,7 +208,7 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
             {tab === "keys" && <ApiKeysPanel rows={keys} pageState={keyPage} setPageState={setKeyPage} refresh={refresh} setToast={setToast} />}
             {tab === "logs" && <LogsPanel rows={logs} pageState={logPage} setPageState={setLogPage} settings={settings} />}
             {tab === "settings" && <SettingsPanel settings={settings} refresh={refresh} saveSettings={saveSettings} setToast={setToast} />}
-            {tab === "tutorial" && <TutorialPanel catalogStatus={catalogStatus} refresh={refresh} setToast={setToast} />}
+            {tab === "tutorial" && <TutorialPanel setToast={setToast} />}
           </>
         )}
       </section>
@@ -224,7 +217,7 @@ export function AdminShell({ user, onLogout, setToast }: AdminShellProps) {
   );
 }
 
-function pageFromResponse<T>(response: { page: number; page_size: number; total: number; total_pages: number }, q: string): PageState {
+function pageFromResponse(response: { page: number; page_size: number; total: number; total_pages: number }, q: string): PageState {
   return {
     page: response.total_pages > 0 ? Math.min(response.page, response.total_pages) : response.page,
     pageSize: response.page_size,

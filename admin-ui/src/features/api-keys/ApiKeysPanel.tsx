@@ -9,6 +9,7 @@ import { TextMono, TextMuted, TextStrong } from "../../components/common/Text";
 import { Button } from "../../components/ui/button";
 import { DataTable, type Column } from "../../components/ui/data-table";
 import { Input } from "../../components/ui/input";
+import { copyText } from "../../lib/clipboard";
 import { formatDate } from "../../lib/format";
 import type { ApiKey, ToastState } from "../../types/admin";
 import { CreateApiKeyDialog } from "./CreateApiKeyDialog";
@@ -48,10 +49,10 @@ export function ApiKeysPanel({ rows, pageState, setPageState, refresh, setToast 
   const copyKey = async (row: ApiKey) => {
     try {
       const result = await revealApiKey(row.id);
-      await navigator.clipboard.writeText(result.key);
+      await copyText(result.key);
       setToast({ type: "ok", message: "完整 key 已复制" });
     } catch (error) {
-      setToast({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      setToast({ type: "error", message: "复制失败，请手动复制完整 key" });
     }
   };
 

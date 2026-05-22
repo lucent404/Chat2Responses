@@ -96,11 +96,6 @@ export type AvailableModel = {
   supports_image_input: boolean;
 };
 
-export type CodexCatalogStatus = {
-  source_model_count: number;
-  generated_model_count: number;
-};
-
 export type RequestLog = {
   id: number;
   api_key_name: string | null;

@@ -24,14 +24,10 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --create-home --home-dir /app --shell /usr/sbin/nologin chat2responses \
-    && mkdir -p /app/data \
-    && chown -R chat2responses:chat2responses /app
+    && mkdir -p /app/data
 
 COPY --from=rust-builder /src/target/release/chat2responses /usr/local/bin/chat2responses
 COPY --from=admin-ui-builder /src/admin-ui/dist ./admin-ui/dist
-
-USER chat2responses
 
 ENV CHAT2RESPONSES_HOST=0.0.0.0 \
     CHAT2RESPONSES_PORT=4444 \
