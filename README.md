@@ -177,6 +177,21 @@ DEEPSEEK_API_KEY=sk-... cargo test --test compat_deepseek_live -- --ignored --te
 MOONSHOT_API_KEY=sk-... cargo test --test compat_kimi_live -- --ignored --test-threads=1
 ```
 
+## 发布
+
+项目版本号放在 `VERSION` 文件中。发布脚本会读取该文件，推送 Docker 镜像的 `v<version>` 和 `latest` 标签，并创建同名 GitHub Release：
+
+```bash
+scripts/release.sh --dry-run
+scripts/release.sh
+```
+
+如只创建 GitHub Release、跳过 Docker 镜像：
+
+```bash
+scripts/release.sh --skip-docker
+```
+
 ## 兼容性边界
 
 Chat2Responses 会尽量保持 Codex 常用 Responses API 请求路径可用，包括文本输入、部分多模态内容、工具调用、namespace tools flatten、`previous_response_id` 历史续接，以及 reasoning summary 的流式事件转换。
