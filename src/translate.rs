@@ -556,6 +556,34 @@ mod tests {
     }
 
     #[test]
+    fn test_from_chat_response_accepts_reasoning_alias() {
+        let chat: ChatResponse = serde_json::from_value(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "final answer",
+                    "reasoning": "provider reasoning"
+                }
+            }]
+        }))
+        .expect("reasoning alias deserializes");
+
+        let (resp, messages) = from_chat_response("resp_1".into(), "public-model", chat);
+        let wire = serde_json::to_value(&resp).expect("response serializes");
+
+        assert_eq!(wire["output"][0]["type"], "reasoning");
+        assert_eq!(
+            wire["output"][0]["summary"][0]["text"],
+            "provider reasoning"
+        );
+        assert_eq!(wire["output"][1]["content"][0]["text"], "final answer");
+        assert_eq!(
+            messages[0].reasoning_content.as_deref(),
+            Some("provider reasoning")
+        );
+    }
+
+    #[test]
     fn test_value_to_text_string() {
         let sessions = SessionStore::new();
         let req = base_req(ResponsesInput::Messages(vec![

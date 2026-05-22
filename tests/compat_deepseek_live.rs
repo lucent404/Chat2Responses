@@ -604,6 +604,110 @@ async fn assert_tool_call_streaming(model: &str) {
 }
 
 #[tokio::test]
+async fn streaming_reasoning_alias_uses_responses_reasoning_events() {
+    let upstream = Router::new().fallback(|| async {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(Body::from(concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning\":\"think \"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"reasoning\":\"more\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n",
+                "data: [DONE]\n\n"
+            )))
+            .unwrap()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, upstream).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let db_path = std::env::temp_dir().join(format!(
+        "chat2responses-test-{}.db",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let database_url = format!("sqlite://{}", db_path.display());
+    let db = Db::connect(&database_url).await.unwrap();
+    let crypto = Crypto::new("test-secret");
+    seed_test_route(
+        &db,
+        &crypto,
+        &format!("http://127.0.0.1:{upstream_port}"),
+        "test-key",
+    )
+    .await;
+    drop(db);
+
+    let relay_port = pick_port();
+    let mut relay_child = Command::new(RELAY_BIN)
+        .env("CHAT2RESPONSES_PORT", relay_port.to_string())
+        .env("CHAT2RESPONSES_DATABASE_URL", &database_url)
+        .env("CHAT2RESPONSES_SECRET", "test-secret")
+        .env("RUST_LOG", "chat2responses=warn")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn Chat2Responses");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        if std::net::TcpStream::connect(("127.0.0.1", relay_port)).is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+    let relay_url = format!("http://127.0.0.1:{relay_port}/v1/responses");
+    let resp = reqwest::Client::new()
+        .post(relay_url)
+        .bearer_auth("test-key")
+        .json(&responses_body("test-model", "hi", true))
+        .send()
+        .await
+        .expect("POST /v1/responses")
+        .error_for_status()
+        .expect("stream status");
+
+    let mut events = resp.bytes_stream().eventsource();
+    let mut event_log: Vec<(String, Value)> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while let Some(ev) = tokio::time::timeout(deadline - Instant::now(), events.next())
+        .await
+        .expect("stream timeout")
+    {
+        let ev = ev.expect("sse parse");
+        let data: Value = serde_json::from_str(&ev.data).expect("event data json");
+        let event_name = ev.event.clone();
+        event_log.push((event_name.clone(), data));
+        if event_name == "response.completed" {
+            break;
+        }
+    }
+
+    let deltas: Vec<&str> = event_log
+        .iter()
+        .filter(|(name, _)| name == "response.reasoning_summary_text.delta")
+        .filter_map(|(_, data)| data["delta"].as_str())
+        .collect();
+    assert_eq!(deltas, ["think ", "more"]);
+
+    let completed = event_log
+        .iter()
+        .find(|(name, _)| name == "response.completed")
+        .map(|(_, data)| data)
+        .expect("completed event");
+    assert_eq!(completed["response"]["output"][0]["type"], "reasoning");
+    assert_eq!(
+        completed["response"]["output"][0]["summary"][0]["text"],
+        "think more"
+    );
+
+    let _ = relay_child.kill();
+    let _ = relay_child.wait();
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 #[ignore]
 async fn live_deepseek_v4_pro_tool_call() {
     assert_tool_call_streaming("deepseek-v4-pro").await;

@@ -104,8 +104,9 @@ pub struct ChatMessage {
     /// [`ChatMessage::text_content`] when you only care about the text.
     pub content: Option<Value>,
     /// Reasoning/thinking content emitted by models like kimi-k2.6.
+    /// Some OpenAI-compatible providers name the same field `reasoning`.
     /// Must be round-tripped back when replaying tool call history.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "reasoning", skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<Value>>,
@@ -165,7 +166,7 @@ pub struct ChatDelta {
     #[allow(dead_code)]
     pub role: Option<String>,
     pub content: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "reasoning")]
     pub reasoning_content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<DeltaToolCall>>,
