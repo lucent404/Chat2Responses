@@ -245,6 +245,7 @@ fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(api)
         .route("/v1/responses", post(handle_responses))
+        .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/v1/models", get(handle_models))
         .route("/", get(|| async { Redirect::temporary("/admin/") }))
         .nest_service("/assets", ServeDir::new(static_dir.join("assets")))
@@ -954,16 +955,39 @@ async fn handle_responses(
         auth.name, req.model, req.stream
     );
 
-    let candidates = match state.db.list_route_candidates(auth.id, &req.model).await {
+    let target = match resolve_proxy_target(&state, &auth, &req.model, started).await {
+        Ok(target) => target,
+        Err(resp) => return resp,
+    };
+    handle_responses_inner(state, req, target).await
+}
+
+struct ProxyTarget {
+    api_key_id: i64,
+    public_model: String,
+    upstream_id: i64,
+    upstream_model: String,
+    upstream_url: String,
+    upstream_api_key: Arc<String>,
+    started: Instant,
+}
+
+async fn resolve_proxy_target(
+    state: &AppState,
+    auth: &db::ApiKeyRecord,
+    public_model: &str,
+    started: Instant,
+) -> std::result::Result<ProxyTarget, Response> {
+    let candidates = match state.db.list_route_candidates(auth.id, public_model).await {
         Ok(v) => v,
-        Err(e) => return internal_error(e),
+        Err(e) => return Err(internal_error(e)),
     };
     let Some(route) = choose_route_candidate(candidates) else {
         write_request_log(
             &state.db,
             LogInput {
                 api_key_id: Some(auth.id),
-                public_model: Some(req.model.clone()),
+                public_model: Some(public_model.to_string()),
                 upstream_id: None,
                 upstream_model: None,
                 status_code: StatusCode::BAD_REQUEST.as_u16(),
@@ -975,60 +999,46 @@ async fn handle_responses(
             },
         )
         .await;
-        return api_error(
+        return Err(api_error(
             StatusCode::BAD_REQUEST,
             "UNKNOWN_MODEL",
             "Unknown or disabled model",
-        );
+        ));
     };
 
     let Some(upstream) = (match state.db.get_upstream(route.upstream_id).await {
         Ok(v) => v,
-        Err(e) => return internal_error(e),
+        Err(e) => return Err(internal_error(e)),
     }) else {
-        return api_error(
+        return Err(api_error(
             StatusCode::BAD_GATEWAY,
             "UPSTREAM_NOT_FOUND",
             "Upstream not found",
-        );
+        ));
     };
     if !upstream.enabled {
-        return api_error(
+        return Err(api_error(
             StatusCode::BAD_GATEWAY,
             "UPSTREAM_DISABLED",
             "Upstream disabled",
-        );
+        ));
     }
 
     let upstream_key = match state.crypto.decrypt(&upstream.encrypted_api_key) {
         Ok(v) => Arc::new(v),
-        Err(e) => return internal_error(e),
+        Err(e) => return Err(internal_error(e)),
     };
     let upstream_url = format!("{}chat/completions", join_base_str(&upstream.base_url));
-    handle_responses_inner(
-        state,
-        req,
-        ProxyTarget {
-            api_key_id: auth.id,
-            public_model: route.public_model,
-            upstream_id: upstream.id,
-            upstream_model: route.upstream_model,
-            upstream_url,
-            upstream_api_key: upstream_key,
-            started,
-        },
-    )
-    .await
-}
 
-struct ProxyTarget {
-    api_key_id: i64,
-    public_model: String,
-    upstream_id: i64,
-    upstream_model: String,
-    upstream_url: String,
-    upstream_api_key: Arc<String>,
-    started: Instant,
+    Ok(ProxyTarget {
+        api_key_id: auth.id,
+        public_model: route.public_model,
+        upstream_id: upstream.id,
+        upstream_model: route.upstream_model,
+        upstream_url,
+        upstream_api_key: upstream_key,
+        started,
+    })
 }
 
 async fn handle_responses_inner(
@@ -1074,6 +1084,223 @@ async fn handle_responses_inner(
         chat_req.stream = false;
         handle_blocking(state, chat_req, target).await
     }
+}
+
+async fn handle_chat_completions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let started = Instant::now();
+    let auth = match authenticate_api_key(&state, &headers).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let _ = state.db.mark_api_key_used(auth.id).await;
+
+    let mut request_body: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("JSON parse error: {e}");
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "INVALID_REQUEST_BODY",
+                e.to_string(),
+            );
+        }
+    };
+
+    let Some(public_model) = request_body
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+    else {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_REQUEST_BODY",
+            "model must be a non-empty string",
+        );
+    };
+
+    debug!(
+        "chat completions request key={} model={}",
+        auth.name, public_model
+    );
+
+    let target = match resolve_proxy_target(&state, &auth, &public_model, started).await {
+        Ok(target) => target,
+        Err(resp) => return resp,
+    };
+
+    if let Some(object) = request_body.as_object_mut() {
+        object.insert(
+            "model".to_string(),
+            serde_json::Value::String(target.upstream_model.clone()),
+        );
+    } else {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "INVALID_REQUEST_BODY",
+            "request body must be a JSON object",
+        );
+    }
+
+    handle_chat_completions_inner(state, request_body, target).await
+}
+
+async fn handle_chat_completions_inner(
+    state: AppState,
+    request_body: serde_json::Value,
+    target: ProxyTarget,
+) -> Response {
+    let stream = request_body
+        .get("stream")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mut builder = state
+        .client
+        .post(&target.upstream_url)
+        .header("Content-Type", "application/json");
+
+    if !target.upstream_api_key.is_empty() {
+        builder = builder.bearer_auth(target.upstream_api_key.as_str());
+    }
+
+    let settings = match state.db.get_app_settings().await {
+        Ok(settings) => settings,
+        Err(e) => return internal_error(e),
+    };
+    if settings.upstream_timeout_seconds > 0 {
+        builder = builder.timeout(StdDuration::from_secs(
+            settings.upstream_timeout_seconds as u64,
+        ));
+    }
+
+    match builder.json(&request_body).send().await {
+        Err(e) => {
+            error!("upstream error: {e}");
+            log_request(
+                &state,
+                &target,
+                StatusCode::BAD_GATEWAY,
+                None,
+                Some(e.to_string()),
+            )
+            .await;
+            api_error(
+                StatusCode::BAD_GATEWAY,
+                "UPSTREAM_CONNECTION_ERROR",
+                e.to_string(),
+            )
+        }
+        Ok(r) if stream => proxy_upstream_stream(state, target, r).await,
+        Ok(r) => proxy_upstream_body(state, target, r).await,
+    }
+}
+
+async fn proxy_upstream_stream(
+    state: AppState,
+    target: ProxyTarget,
+    upstream: reqwest::Response,
+) -> Response {
+    let status = upstream.status();
+    if !status.is_success() {
+        let body = upstream.text().await.unwrap_or_default();
+        error!("upstream {status}: {body}");
+        log_request(&state, &target, status, None, Some(body.clone())).await;
+        return (
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            body,
+        )
+            .into_response();
+    }
+
+    log_request(&state, &target, status, None, None).await;
+    let mut response = Response::builder().status(status);
+    response = copy_proxy_headers(response, upstream.headers());
+    response
+        .body(Body::from_stream(upstream.bytes_stream()))
+        .unwrap_or_else(|e| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                e.to_string(),
+            )
+        })
+}
+
+async fn proxy_upstream_body(
+    state: AppState,
+    target: ProxyTarget,
+    upstream: reqwest::Response,
+) -> Response {
+    let status = upstream.status();
+    let headers = upstream.headers().clone();
+    let body = match upstream.bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log_request(
+                &state,
+                &target,
+                StatusCode::BAD_GATEWAY,
+                None,
+                Some(e.to_string()),
+            )
+            .await;
+            return api_error(
+                StatusCode::BAD_GATEWAY,
+                "UPSTREAM_CONNECTION_ERROR",
+                e.to_string(),
+            );
+        }
+    };
+
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&body).to_string();
+        error!("upstream {status}: {text}");
+        log_request(&state, &target, status, None, Some(text)).await;
+    } else {
+        log_request(&state, &target, status, chat_usage_from_body(&body), None).await;
+    }
+
+    let mut response = Response::builder()
+        .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY));
+    response = copy_proxy_headers(response, &headers);
+    response.body(Body::from(body)).unwrap_or_else(|e| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            e.to_string(),
+        )
+    })
+}
+
+fn copy_proxy_headers(
+    mut builder: axum::http::response::Builder,
+    headers: &reqwest::header::HeaderMap,
+) -> axum::http::response::Builder {
+    for (key, value) in headers {
+        let lower = key.as_str().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "transfer-encoding" | "content-length" | "connection"
+        ) {
+            continue;
+        }
+        builder = builder.header(key, value);
+    }
+    builder
+}
+
+fn chat_usage_from_body(body: &[u8]) -> Option<(i64, i64, i64)> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let usage = value.get("usage")?;
+    let prompt = usage.get("prompt_tokens")?.as_i64()?;
+    let completion = usage.get("completion_tokens")?.as_i64()?;
+    let total = usage.get("total_tokens")?.as_i64()?;
+    Some((prompt, completion, total))
 }
 
 fn stream_log_callback(
